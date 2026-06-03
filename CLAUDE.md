@@ -115,4 +115,25 @@ Utterance
 
 ## Current Phase
 
-**Phase 8 — General Object Handling.** Expanding beyond door navigation to general objects (keys, boxes, etc.). Prior phases 0–7.8 are complete; their regression probes live in `evals/`.
+**Phase 8 — General Object Handling.** Expanding beyond door navigation to general objects. Prior phases 0–7.95 are complete; their regression probes live in `evals/`.
+
+### Phase 8 progress
+
+| Stage | Status | Notes |
+|-------|--------|-------|
+| 8.1 Environment identity + stale claim safety | done | `phase8_environment_change_stale_claim_probe.py` |
+| 8.2 Explicit environment assumptions | done | `phase8_environment_assumption_probe.py` |
+| 8.3 Conservative RequestPlan reuse | done | `phase8_plan_reuse_probe.py` |
+| 8.3.5 Named Concept Knowledge Base | done | `phase835_knowledge_base_probe.py` |
+| 8.4 Mismatch detection | done | `phase84_mismatch_detection_probe.py` |
+| 8.4.5–8.5 Sequential/motor intents, mission contract, typed claims, command registry | done | multiple probes |
+| **Key object type** | **done (this PR)** | `phase8_key_object_probe.py` — 8/8 PASS |
+| `task.go_to_object.key` execution | planned | `task.pickup.key` registered as `unsupported`; capability gap surfaced correctly |
+| Phase 9 — Repair loop | planned | `jeenom/repair_loop.py` not yet started |
+
+### Eval baseline (post key PR)
+- `eval_master.py`: **35/35 passing**
+- `pytest tests/`: **157 passing**, 3 pre-existing failures unrelated to object types
+
+### Known follow-ups (see `TODOS.md`)
+- Generalise `SmokeTestCompiler` door/key regex to build dynamically from `OPERATOR_OBJECT_TYPES`
