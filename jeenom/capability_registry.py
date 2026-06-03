@@ -143,6 +143,24 @@ def minigrid_manifest_dict() -> dict[str, Any]:
             failure_modes=["no_path_found", "target_missing"],
         ),
         _top_level_task_capability(
+            name="task.go_to_object.key",
+            description="Run the known go_to_object recipe for a grounded key target.",
+            inputs=["target.color", "target.object_type", "target_location"],
+            outputs=["task_complete", "execution_report"],
+            side_effects=["moves_agent"],
+            implementation_status="implemented",
+            runtime_binding={
+                "kind": "understanding_recipe",
+                "value": "go_to_object",
+                "procedure_steps": [
+                    "locate_object",
+                    "navigate_to_object",
+                    "verify_adjacent",
+                    "done",
+                ],
+            },
+        ),
+        _top_level_task_capability(
             name="task.pickup.key",
             description=(
                 "Pick up a key task. Low-level pickup exists, but key grounding, "

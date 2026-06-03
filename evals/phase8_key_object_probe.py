@@ -11,8 +11,7 @@ Checks:
   task_pickup_key_unsupported — task.pickup.key implementation_status == 'unsupported'
   smoke_compile_go_to_key     — SmokeTestCompiler compiles 'go to the red key'
                                 as task_instruction with object_type=key
-  go_to_key_reports_gap       — handle_utterance('go to the red key') reports MISSING SKILLS
-                                for task.go_to_object.key (capability gap surfaced correctly)
+  go_to_key_completes         — handle_utterance('go to the red key') returns RUN COMPLETE
   golden_path_no_regression   — 'go to the red door' still returns RUN COMPLETE
 """
 from __future__ import annotations
@@ -33,12 +32,12 @@ from jeenom.primitive_library import TASK_PRIMITIVES
 from jeenom.schemas import OPERATOR_OBJECT_TYPES
 
 
-def _make_session(memory_root: Path | None = None) -> OperatorStationSession:
+def _make_session(memory_root: Path | None = None, env_id: str = "MiniGrid-GoToDoor-8x8-v0", seed: int = 42) -> OperatorStationSession:
     return OperatorStationSession(
         compiler=SmokeTestCompiler(),
         compiler_name="smoke_test",
-        env_id="MiniGrid-GoToDoor-8x8-v0",
-        seed=42,
+        env_id=env_id,
+        seed=seed,
         render_mode="none",
         memory_root=memory_root or Path(tempfile.mkdtemp()),
     )
@@ -76,12 +75,10 @@ def main() -> int:
         and intent.target.get("color") == "red"
     )
 
-    # ── Station handles key utterances ────────────────────────────────────────
-    session = _make_session()
+    # ── Station handles key utterances ─────────────────   ───────────────────────
+    session = _make_session(env_id="MiniGrid-GoToObject-8x8-N2-v0", seed=13)
     result = session.handle_utterance("go to the red key")
-    metrics["go_to_key_reports_gap"] = (
-        "MISSING SKILLS" in result and "task.go_to_object.key" in result
-    )
+    metrics["go_to_key_completes"] = "RUN COMPLETE" in result
 
     # ── Golden path regression ────────────────────────────────────────────────
     session2 = _make_session()

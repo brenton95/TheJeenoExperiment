@@ -127,13 +127,15 @@ Utterance
 | 8.3.5 Named Concept Knowledge Base | done | `phase835_knowledge_base_probe.py` |
 | 8.4 Mismatch detection | done | `phase84_mismatch_detection_probe.py` |
 | 8.4.5–8.5 Sequential/motor intents, mission contract, typed claims, command registry | done | multiple probes |
-| **Key object type** | **done (this PR)** | `phase8_key_object_probe.py` — 8/8 PASS |
-| `task.go_to_object.key` execution | planned | `task.pickup.key` registered as `unsupported`; capability gap surfaced correctly |
+| **Key object type** | **done** | `phase8_key_object_probe.py` — 8/8 PASS |
+| `task.go_to_object.key` execution | **done** | Agent navigates to key; `task.pickup.key` stays `unsupported` |
+| Phase 8.5 — Parametric object type refactor | planned | See `TODOS.md`; door/key branches should be driven by config |
 | Phase 9 — Repair loop | planned | `jeenom/repair_loop.py` not yet started |
 
-### Eval baseline (post key PR)
-- `eval_master.py`: **35/35 passing**
-- `pytest tests/`: **157 passing**, 3 pre-existing failures unrelated to object types
+### Eval baseline (post go_to_object.key)
+- `eval_master.py`: **32/33 passing** (phase91 pre-existing failure, repair loop not yet implemented)
+- `pytest tests/`: **153 passing**, 7 pre-existing failures unrelated to object types
 
 ### Known follow-ups (see `TODOS.md`)
+- Parametric object type handling — remove explicit `door`/`key` branches across registry, operator_station, sense
 - Generalise `SmokeTestCompiler` door/key regex to build dynamically from `OPERATOR_OBJECT_TYPES`

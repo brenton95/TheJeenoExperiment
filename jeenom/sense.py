@@ -389,5 +389,7 @@ class MiniGridSense:
 
         if target_type in _TRAVERSE_TO_ADJACENT:
             sample.adjacency_to_target = distance == 1
+        elif target_type == "key":
+            sample.adjacency_to_target = distance == 1    
         else:
             sample.adjacency_to_target = distance == 0
