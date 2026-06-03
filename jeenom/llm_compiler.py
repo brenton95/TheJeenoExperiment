@@ -260,7 +260,7 @@ class SmokeTestCompiler(CompilerBackend):
         normalized = instruction.strip().lower()
 
         door_match = re.search(
-            r"go to the (?P<color>\w+) (?P<object_type>door)",
+            r"go to the (?P<color>\w+) (?P<object_type>door|key)",
             normalized,
         )
         if door_match:
@@ -602,7 +602,7 @@ class SmokeTestCompiler(CompilerBackend):
             color_pattern = r"red|green|blue|yellow|purple|grey|gray"
         door_match = re.search(
             rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
-            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door)\b",
+            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door|key)\b",
             normalized,
         )
         _SUPERLATIVE_TERMS = frozenset([
@@ -1292,16 +1292,17 @@ class SmokeTestCompiler(CompilerBackend):
 
         if door_match:
             color = "grey" if door_match.group("color") == "gray" else door_match.group("color")
+            object_type = door_match.group("object_type")
             return OperatorIntent(
                 intent_type="task_instruction",
-                canonical_instruction=f"go to the {color} door",
+                canonical_instruction=f"go to the {color} {object_type}",
                 task_type="go_to_object",
-                target={"color": color, "object_type": "door"},
+                target={"color": color, "object_type": object_type},
                 target_selector=None,
-                required_capabilities=["task.go_to_object.door"],
+                required_capabilities=[f"task.go_to_object.{object_type}"],
                 confidence=1.0,
-                reason="Deterministic operator-intent fallback parsed a door navigation task.",
-            )
+                reason="Deterministic operator-intent fallback parsed a navigation task.",
+        )
 
         delivery_match = re.search(
             rf"\b(?P<color>{color_pattern}) (?P<object_type>door)\b.*\bdelivery target\b",

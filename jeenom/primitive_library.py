@@ -63,6 +63,15 @@ TASK_PRIMITIVES: dict[str, PrimitiveSpec] = {
         description="Check whether the agent reached the required completion position.",
         safety_notes="Only succeed when the runtime evidence indicates adjacency.",
     ),
+    "pickup_object": PrimitiveSpec(
+        name="pickup_object",
+        consumes=("adjacency_to_target",),
+        produces=("item_picked_up",),
+        description="Pick up the target item once adjacent.",
+        safety_notes="Must only fire after adjacency to the correct target object is verified. Never pick up an unintended item.",
+        required_action_primitives=("pickup",),
+        implementation_status="planned",
+    ),
     "done": PrimitiveSpec(
         name="done",
         consumes=("adjacency_to_target",),

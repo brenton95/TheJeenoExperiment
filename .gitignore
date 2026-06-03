@@ -9,3 +9,7 @@ Minigrid/
 # Ignore editor and OS files
 .vscode/
 .DS_Store
+
+# Ignore virtual environments
+venv/
+.venv/
