@@ -115,7 +115,54 @@ Utterance
 
 ## Current Phase
 
-**Phase 8 — General Object Handling.** Expanding beyond door navigation to general objects. Prior phases 0–7.95 are complete; their regression probes live in `evals/`.
+**Branch `phase14/ai2thor-substrate` — AI2-THOR Substrate Spike.**
+This branch is the Phase 14 exploratory spike described in `PlanOfAction/task_plan.md`. Master is at Phase 13 complete / 70/70 evals green. This branch never blocks master — it is requirements-discovery only.
+
+### Branch goal
+Prove ORPI v0.1 is substrate-independent by wiring JEENOM to AI2-THOR. Every place ORPI bends or breaks gets filed as a spec issue against `orpi_spec.md`. Output feeds Phase 15 (committed port + ORPI v1 freeze).
+
+### What needs building (in order)
+Five files — model each on its MiniGrid counterpart:
+
+| New file | MiniGrid counterpart | What it does |
+|---|---|---|
+| `jeenom/ai2thor_operational_context.py` | `minigrid_operational_context.py` | `OperationalContext` for AI2-THOR vocabulary (object types, colours, metrics) |
+| `jeenom/ai2thor_domain_helper.py` | `minigrid_domain_helper.py` | Parses utterances, normalises colours, builds capability handles |
+| `jeenom/ai2thor_sense.py` | `sense.py` | Maps `event.metadata["objects"]` → `SceneModel` / `WorldModelSample` |
+| `jeenom/ai2thor_spine.py` | `spine.py` | Maps motor primitives → `controller.step(action=...)` calls |
+| `jeenom/ai2thor_substrate_adapter.py` | `minigrid_substrate_adapter.py` | Implements `SubstrateAdapter` protocol; wires all the above into a `RuntimePackage` |
+
+### Key architectural decisions already made
+- **Coordinate system:** project AI2-THOR 3D `(x, z)` continuous coords to a 2D occupancy grid — matches existing `SceneModel` schema with no core changes. Vertical (`y`) is ignored for this spike.
+- **Rendering:** JEENOM never needs the RGB frame. The adapter reads only `event.metadata` (object list, agent position/rotation). Pass `renderImage=False` on every `controller.step()` call.
+- **Controller init:** `ai2thor` is installed (`pip show ai2thor` → 4.3.0). On WSL2 the Unity socket layer is broken — the adapter must be testable without a live controller. Write the adapter so `controller` is injected (not constructed internally), enabling unit tests to pass in a mock.
+- **ORPI manifest:** produce a real `OrpiManifest` for AI2-THOR using `OrpiManifest.from_context_and_registry()` — same pattern as MiniGrid.
+
+### Golden path target for this spike
+```
+instruction: "go to the red apple"
+compiler:    SmokeTestCompiler (no API key needed)
+expected:    task_complete=True, runtime_llm_calls_during_render=0
+```
+This requires `task.go_to_object.apple` in the capability registry and the sense/spine loop working end-to-end.
+
+### Interface contracts to satisfy
+- `SubstrateAdapter` protocol: `jeenom/substrate_adapter.py` — every method must be implemented
+- `RuntimePackage`: `jeenom/runtime_package.py` — `domain_helper.operational_context` must be the same object passed to `RuntimePackage`
+- ORPI conformance probes: `evals/` suite — run `python evals/eval_master.py --suite orpi` and all 9 must pass against the AI2-THOR manifest
+
+### Testing without a live Unity process
+Run the interface-contract tests without AI2-THOR installed/running:
+```bash
+python -m pytest -q tests/test_ai2thor_substrate_boundary.py
+```
+(This file does not exist yet — write it as the first test file for this spike. It should import the adapter with a mock controller and assert the `SubstrateAdapter` protocol is satisfied.)
+
+### When you have a machine with GPU / native Linux
+```bash
+pip install ai2thor
+python evals/eval_golden_ai2thor.py   # does not exist yet — write it
+```
 
 ### Phase 8 progress
 
