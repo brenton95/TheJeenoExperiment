@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Ways of working** (collaboration model, model-split protocol, push-back norm,
+> engineering standards) live in [`AGENTS.md`](./AGENTS.md). Read it alongside this file.
+>
+> **Never assume — ask.** On any genuine ambiguity (scope, interpretation, design,
+> tradeoffs, or a request with more than one reasonable reading), stop and ask
+> rather than guess. Obvious orientation (reading files, `ls`, `grep`) needs no
+> permission, but no silent guesses on decisions that are the user's to make.
+>
+> **Follow the project's conventions, not your own.** This is an open-source
+> contribution: durable docs go in the project's existing homes (`README.md`,
+> `PlanOfAction/`, the relevant spec) and merge via PR — git history is the
+> record. Personal session notes stay in gitignored `.agent/`. This file
+> (`CLAUDE.md`) is AI instructions, not a work log: **rewrite** the "Current
+> Phase" pointer when a phase completes, don't append. Don't invent new doc files
+> when a home already exists.
+
 ## Commands
 
 ```bash
@@ -156,7 +172,7 @@ Run the interface-contract tests without AI2-THOR installed/running:
 ```bash
 python -m pytest -q tests/test_ai2thor_substrate_boundary.py
 ```
-(This file does not exist yet — write it as the first test file for this spike. It should import the adapter with a mock controller and assert the `SubstrateAdapter` protocol is satisfied.)
+This file exists and is green (11/11): it imports the adapter with a mock controller and asserts the `SubstrateAdapter` contract is satisfied and that the adapter wires into a valid `RuntimePackage`. Boundary deviations are filed in `PlanOfAction/orpi_spec.md` §11 (F1: domain registration is last-writer-wins, substrates can't coexist in-process; F2: `SceneObject.x/y` int vs. AI2-THOR float coords). Live sense/spine behavior is intentionally not yet implemented.
 
 ### When you have a machine with GPU / native Linux
 ```bash

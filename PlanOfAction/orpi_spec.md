@@ -229,3 +229,42 @@ A substrate is ORPI-v0.1 conformant when:
   the port is recorded as a spec issue.
 - v1 freeze happens only after the second substrate is conformant. From v1: additive changes only;
   breaking changes require a major version.
+
+## 11. Spike Findings (Phase 14 — AI2-THOR boundary)
+
+Deviations surfaced while wiring a second substrate (AI2-THOR). Per §10, every
+place v0.1 bends or breaks is recorded here. These feed the Phase 15 port and the
+v1 freeze decision.
+
+### F1 — Domain registration is last-writer-wins; substrates cannot coexist in-process (kernel)
+
+`register_domain_vocabulary` / `register_domain_index_maps` /
+`register_open_state_passable` / `register_traverse_to_adjacent` are
+**module-level global registrations** in `schemas.py` / `sense.py`. They are not
+keyed by substrate, so the last substrate to register clobbers the previous one.
+Two substrates (MiniGrid + AI2-THOR) therefore cannot be live in the same process.
+
+- **Surfaced by:** `Ai2thorOperationalContext` deliberately does **not** call these
+  registrars (see its docstring), to avoid clobbering MiniGrid's registration. The
+  boundary test passes only because of this omission.
+- **Severity:** kernel-level, not adapter-level. This is a genuine
+  substrate-independence failure — the registration mechanism is substrate-exclusive.
+- **Triage for Phase 15:** key these registrations by `substrate_id` (per-context
+  maps) instead of process globals, or move them onto `OperationalContext` itself.
+- **Status:** open. Do not resolve as part of the boundary spike (kernel edit;
+  escalate per `AGENTS.md`).
+
+### F2 — `SceneObject.x/y` are `int`; AI2-THOR coordinates are continuous floats (schema)
+
+`SceneObject.x` / `.y` are `int`-typed, but AI2-THOR positions are continuous 3D
+floats `(x, z)`. The spike's decided mitigation is to project `(x, z)` onto a 2D
+occupancy grid, but the schema's `int` typing forces quantization at the boundary
+and will lose sub-cell precision.
+
+- **Surfaced by:** plan 001, Finding #1 (pre-filed before sense work).
+- **Severity:** schema-level. Not exercised by the boundary test (no live sense
+  loop yet); becomes blocking the moment `ai2thor_sense.py` maps
+  `event.metadata["objects"]` → `SceneModel`.
+- **Triage for Phase 15:** decide adapter-side quantization (keep `int`, document
+  precision loss) vs. widening `SceneObject` coords to `float` (kernel/schema edit).
+- **Status:** open; triage when sense work starts.
