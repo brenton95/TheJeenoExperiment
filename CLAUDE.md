@@ -149,7 +149,7 @@ Five files — model each on its MiniGrid counterpart:
 | `jeenom/ai2thor_substrate_adapter.py` | `minigrid_substrate_adapter.py` | Implements `SubstrateAdapter` protocol; wires all the above into a `RuntimePackage` |
 
 ### Key architectural decisions already made
-- **Coordinate system:** project AI2-THOR 3D `(x, z)` continuous coords to a 2D occupancy grid — matches existing `SceneModel` schema with no core changes. Vertical (`y`) is ignored for this spike.
+- **Coordinate system:** F2 resolved upstream (`origin/master` `5b89f0f`) — `SceneObject` coords are now `float` with an optional `z` axis, and `jeenom/geometry.py` provides N-dimensional distance. The AI2-THOR sense adapter therefore keeps **true-3D** object coords (axis cross-map: JEENO.y ← AI2-THOR.z floor-depth, JEENO.z ← AI2-THOR.y vertical) via `geometry.as_coord`. The **navigation target stays floor-plane (2D)** — the agent drives the floor, so height is perceived (`SceneObject.z`) but not navigated. Manipulation (which would consume height) is filed as F6, not built.
 - **Rendering:** JEENOM never needs the RGB frame. The adapter reads only `event.metadata` (object list, agent position/rotation). Pass `renderImage=False` on every `controller.step()` call.
 - **Controller init:** `ai2thor` is installed (`pip show ai2thor` → 4.3.0). On WSL2 the Unity socket layer is broken — the adapter must be testable without a live controller. Write the adapter so `controller` is injected (not constructed internally), enabling unit tests to pass in a mock.
 - **ORPI manifest:** produce a real `OrpiManifest` for AI2-THOR using `OrpiManifest.from_context_and_registry()` — same pattern as MiniGrid.
@@ -172,7 +172,7 @@ Run the interface-contract tests without AI2-THOR installed/running:
 ```bash
 python -m pytest -q tests/test_ai2thor_substrate_boundary.py
 ```
-This file exists and is green (11/11): it imports the adapter with a mock controller and asserts the `SubstrateAdapter` contract is satisfied and that the adapter wires into a valid `RuntimePackage`. Boundary deviations are filed in `PlanOfAction/orpi_spec.md` §11 (F1: domain registration is last-writer-wins, substrates can't coexist in-process; F2: `SceneObject.x/y` int vs. AI2-THOR float coords). Live sense/spine behavior is intentionally not yet implemented.
+This file is green (24 passing): it imports the adapter with a mock controller, asserts the `SubstrateAdapter` contract is satisfied, that the adapter wires into a valid `RuntimePackage`, and that the sense loop maps `event.metadata` → true-3D `SceneModel`. Boundary deviations are filed in `PlanOfAction/orpi_spec.md` §11: F1 (domain registration last-writer-wins), F2 (**resolved** — coords now float+z), F3 (no reward signal → success needs a postcondition check), F4 (motor primitives MiniGrid-shaped), F5 (`grid_width/height` non-optional; AI2-THOR has no grid), F6 (world-frame coords vs. future manipulation). **Sense is implemented (plan 006); spine motor-dispatch is implemented (plan 003); spine navigation/path-planning + success detection are NOT yet built (plan 005) and require a live Unity controller to validate.**
 
 ### When you have a machine with GPU / native Linux
 ```bash
