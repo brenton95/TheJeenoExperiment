@@ -13,3 +13,6 @@ Minigrid/
 # Ignore virtual environments
 venv/
 .venv/
+
+# Ignore agent scratch / working files (plans, notes) — never enters a PR
+.agent/
