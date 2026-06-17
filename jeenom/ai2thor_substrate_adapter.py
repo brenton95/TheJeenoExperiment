@@ -9,6 +9,8 @@ from .capability_registry import (
     PrimitiveManifest,
     _top_level_task_capability,
 )
+from .ai2thor_sense import Ai2thorSense
+from .ai2thor_spine import AI2THOR_ACTIONS, Ai2thorSpine
 from .llm_compiler import CompilerBackend
 from .memory import OperationalMemory
 from .orpi import OrpiManifest
@@ -81,19 +83,19 @@ class Ai2thorSubstrateAdapter:
         memory: OperationalMemory,
         compiler: CompilerBackend,
         plan_cache: PlanCache,
-    ) -> Any:
-        raise NotImplementedError("Ai2thorSubstrateAdapter.create_sense: sense work not started")
+    ) -> Ai2thorSense:
+        return Ai2thorSense(memory, compiler, plan_cache=plan_cache)
 
     def create_spine(
         self,
         memory: OperationalMemory,
         compiler: CompilerBackend,
         plan_cache: PlanCache,
-    ) -> Any:
-        raise NotImplementedError("Ai2thorSubstrateAdapter.create_spine: spine work not started")
+    ) -> Ai2thorSpine:
+        return Ai2thorSpine(memory, self.controller, compiler, plan_cache=plan_cache)
 
     def known_action_names(self) -> list[str]:
-        return []
+        return sorted(AI2THOR_ACTIONS)
 
     def is_action_known(self, action_name: str) -> bool:
         return action_name in self.known_action_names()

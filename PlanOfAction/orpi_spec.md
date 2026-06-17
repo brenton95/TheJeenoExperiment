@@ -268,3 +268,53 @@ and will lose sub-cell precision.
 - **Triage for Phase 15:** decide adapter-side quantization (keep `int`, document
   precision loss) vs. widening `SceneObject` coords to `float` (kernel/schema edit).
 - **Status:** open; triage when sense work starts.
+
+### F3 — Success determination is coupled to gym `reward` signal (spine)
+
+`MiniGridSpine._execute_env_action` (`spine.py:231–237`) determines task success
+via `done and reward > 0`. AI2-THOR has no reward signal — success must come from
+a postcondition/sense check (e.g. "am I near the target object?"). The AI2-THOR
+spine therefore returns `status="running"` for all dispatched motor actions; it
+never fakes `succeeded`.
+
+- **Surfaced by:** plan 003 spine implementation. Verified at `spine.py:232`.
+- **Severity:** spine-level. Not a blocker for motor dispatch, but blocks
+  end-to-end task completion detection on AI2-THOR.
+- **Triage for Phase 15:** frame against ORPI's existing `postcondition_primitive`
+  concept (§9.3). Success should be determined by a postcondition sense check, not
+  a reward signal. Consider making success-determination pluggable per substrate.
+- **Status:** open.
+
+### F4 — `primitive_library.py` motor primitives are MiniGrid-shaped (primitive library)
+
+`ACTION_PRIMITIVES` in `primitive_library.py` uses `int` `runtime_value` fields
+(0–6 mapping to MiniGrid gym action indices) and MiniGrid-worded descriptions
+(e.g. "Turn the MiniGrid agent left"). Despite being billed as the
+substrate-agnostic source of truth, these are substrate-specific.
+
+- **Surfaced by:** plan 003, confirmed by reading `primitive_library.py:248–332`.
+- **Severity:** primitive-library-level. The AI2-THOR spine works around this by
+  maintaining its own `AI2THOR_ACTIONS` map in `ai2thor_spine.py` and never
+  importing `ACTION_PRIMITIVES`. But the leak means `primitive_library.py` cannot
+  serve as a true substrate-agnostic registry.
+- **Triage for Phase 15:** either split `primitive_library.py` into
+  substrate-agnostic primitives + substrate-specific bindings, or move motor
+  bindings onto the substrate adapter (where AI2-THOR's already live).
+- **Status:** open.
+
+### F5 — `SceneModel.grid_width/grid_height` are non-optional; AI2-THOR has no grid (schema)
+
+`SceneModel` requires `grid_width: int` and `grid_height: int` as non-optional
+constructor arguments. AI2-THOR operates in continuous 3D space with no
+occupancy grid — there is no meaningful width/height. The AI2-THOR sense adapter
+stubs these as `(0, 0)` via `WorldModelSample.grid_size=None`, which
+`from_world_model_sample` falls back to `(0, 0)`.
+
+- **Surfaced by:** plan 004 sense implementation (`ai2thor_sense.py`).
+- **Severity:** schema-level. The stub works for the spike, but downstream code
+  that reads `grid_width/height` (e.g. `_navigation_goals` bounds checking in
+  `spine.py:288`) will behave incorrectly with `(0, 0)`.
+- **Triage for Phase 15:** either make `grid_width/height` optional in
+  `SceneModel` (kernel edit), or define a projected occupancy grid for AI2-THOR
+  derived from `GetReachablePositions` (adapter-side, plan 005 territory).
+- **Status:** open.
