@@ -261,6 +261,7 @@ class _FakeObservation:
 def _apple_metadata(
     apple_x: float = 1.5,
     apple_z: float = 3.7,
+    apple_y: float = 0.9,
     agent_x: float = 0.0,
     agent_z: float = 0.0,
     agent_rot_y: float = 90.0,
@@ -270,7 +271,7 @@ def _apple_metadata(
             {
                 "objectType": "Apple",
                 "name": "Apple_1",
-                "position": {"x": apple_x, "y": 0.9, "z": apple_z},
+                "position": {"x": apple_x, "y": apple_y, "z": apple_z},
             },
         ],
         "agent": {
@@ -335,8 +336,9 @@ def test_sense_agent_pose_from_metadata() -> None:
 
     pose = sample.agent_pose
     assert pose is not None
-    assert pose["x"] == 2
-    assert pose["y"] == 5
+    assert pose["x"] == 2.0
+    assert pose["y"] == 5.0
+    assert pose["z"] == 0.0
     assert pose["dir"] == 180
 
 
@@ -352,21 +354,25 @@ def test_sense_no_target_when_type_missing() -> None:
     assert sample.target_location is None
 
 
-@pytest.mark.xfail(
-    reason="TODO(F2): SceneObject.x/y are int; float precision requires Steve's coord fix",
-    strict=True,
-)
 def test_sense_coord_preserves_float_precision() -> None:
-    """Asserts float coord precision — will xfail until F2 lands (int->float)."""
+    """Three distinct AI2-THOR axes -> correct JEENO fields, float-preserved."""
     sense = Ai2thorSense(memory=None, compiler=None)
-    obs = _FakeObservation(_apple_metadata(apple_x=1.5, apple_z=3.7))
+    obs = _FakeObservation(_apple_metadata(apple_x=1.5, apple_z=3.7, apple_y=0.9))
     ef = EvidenceFrame(needs=["target_location"])
     ec = ExecutionContext(active_skill="go_to_object", params={"object_type": "apple"})
 
     _, _, sample, _, _ = sense.tick(obs, ef, ec)
 
+    obj = sample.target_object
+    assert obj is not None
+    assert isinstance(obj["x"], float), f"expected float x, got {type(obj['x'])}"
+    assert abs(obj["x"] - 1.5) < 0.01
+    assert abs(obj["y"] - 3.7) < 0.01
+    assert abs(obj["z"] - 0.9) < 0.01
+
     assert sample.target_location is not None
-    x, y = sample.target_location
-    assert isinstance(x, float), f"expected float x, got {type(x)}"
-    assert abs(x - 1.5) < 0.01
-    assert abs(y - 3.7) < 0.01
+    tx, ty = sample.target_location
+    assert isinstance(tx, float), f"expected float tx, got {type(tx)}"
+    assert abs(tx - 1.5) < 0.01
+    assert abs(ty - 3.7) < 0.01
+    assert len(sample.target_location) == 2

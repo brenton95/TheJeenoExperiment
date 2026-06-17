@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import geometry
 from .schemas import (
     OperationalEvidence,
     Percepts,
@@ -10,13 +11,17 @@ from .schemas import (
 )
 
 
-def _project_coord(ai2thor_x: float, ai2thor_z: float) -> tuple[int, int]:
-    # TODO(F2): SceneObject.x/y are int in schemas.py today; AI2-THOR coords are
-    # float meters. Until Steve lands the int->float coord fix, we quantize here.
-    # When F2 lands: return (ai2thor_x, ai2thor_z) as floats directly.
-    # This is the ONLY adapter-side line coupled to coord typing.
-    # Note: AI2-THOR z -> JEENO y; vertical y is dropped.
-    return int(round(ai2thor_x)), int(round(ai2thor_z))
+def _project_coords(pos: dict[str, Any]) -> tuple[float, float, float]:
+    """AI2-THOR position {x, y, z} -> JEENO (x, y, z).
+
+    AI2-THOR y is vertical; its (x, z) is the floor plane.
+    JEENO floor is (x, y), JEENO z is height.
+    So: JEENO.y <- AI2THOR.z, JEENO.z <- AI2THOR.y.
+    """
+    jx = geometry.as_coord(pos.get("x", 0.0))
+    jy = geometry.as_coord(pos.get("z", 0.0))
+    jz = geometry.as_coord(pos.get("y", 0.0))
+    return jx, jy, jz
 
 
 class Ai2thorSense:
@@ -72,27 +77,25 @@ class Ai2thorSense:
         agent_pos = agent_raw.get("position", {})
         agent_rot = agent_raw.get("rotation", {})
 
-        agent_x, agent_y = _project_coord(
-            agent_pos.get("x", 0.0),
-            agent_pos.get("z", 0.0),
-        )
+        agent_x, agent_y, agent_z = _project_coords(agent_pos)
         agent_dir = int(round(agent_rot.get("y", 0.0))) % 360
 
         grid_objects: list[dict[str, Any]] = []
-        target_location: tuple[int, int] | None = None
+        target_location: tuple[float, float] | None = None
         target_object: dict[str, Any] | None = None
         target_visible = False
 
         for obj in objects_raw:
             obj_type = obj.get("objectType", "").lower()
             obj_pos = obj.get("position", {})
-            ox, oy = _project_coord(obj_pos.get("x", 0.0), obj_pos.get("z", 0.0))
+            ox, oy, oz = _project_coords(obj_pos)
 
             grid_obj: dict[str, Any] = {
                 "type": obj_type,
                 "color": None,
                 "x": ox,
                 "y": oy,
+                "z": oz,
                 "state": None,
             }
             grid_objects.append(grid_obj)
@@ -108,7 +111,7 @@ class Ai2thorSense:
             grid_size=None,
             grid_objects=grid_objects,
             passable_positions=set(),
-            agent_pose={"x": agent_x, "y": agent_y, "dir": agent_dir},
+            agent_pose={"x": agent_x, "y": agent_y, "z": agent_z, "dir": agent_dir},
             target_visible=target_visible,
             target_location=target_location,
             target_object=target_object,
