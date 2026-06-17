@@ -267,7 +267,15 @@ and will lose sub-cell precision.
   `event.metadata["objects"]` → `SceneModel`.
 - **Triage for Phase 15:** decide adapter-side quantization (keep `int`, document
   precision loss) vs. widening `SceneObject` coords to `float` (kernel/schema edit).
-- **Status:** open; triage when sense work starts.
+- **Status:** **RESOLVED upstream** (`origin/master` `5b89f0f`, "changed hardcoded
+  2D into scalable coordinate system"). The kernel chose the second option:
+  `SceneObject.x/y` and `agent_x/y` are now `float`, with an optional
+  `z: float | None` (absent on 2D substrates, set on 3D ones). A new pure
+  `jeenom/geometry.py` provides N-dimensional `manhattan`/`euclidean` and an
+  `as_coord` coercer (keeps integral grid coords as `int` for MiniGrid display,
+  preserves genuine floats). MiniGrid behaviour preserved. The adapter must now
+  route coords through `geometry.as_coord` instead of `int(round(...))` — see
+  plan 006.
 
 ### F3 — Success determination is coupled to gym `reward` signal (spine)
 
@@ -318,3 +326,31 @@ stubs these as `(0, 0)` via `WorldModelSample.grid_size=None`, which
   `SceneModel` (kernel edit), or define a projected occupancy grid for AI2-THOR
   derived from `GetReachablePositions` (adapter-side, plan 005 territory).
 - **Status:** open.
+
+### F6 — Coordinate frame is world-absolute; manipulation will need height + body-relative commands (kernel convention)
+
+The kernel reasons in **absolute world coordinates**: `MiniGridSense` computes
+distance by subtracting agent world-pose from target world-pose
+(`sense.py:383–384`) and the spine plans navigation over those same world cells.
+AI2-THOR metadata is natively world-frame too, so the adapter passes coords
+through with no frame conversion — this is fine **for navigation**.
+
+It breaks down for **manipulation**. AI2-THOR agents can have an arm; reaching for
+an object needs (a) the object's **height** — now capturable via `SceneObject.z`
+(F2) — and (b) plausibly **body-relative / egocentric** arm commands ("0.4m
+forward, 0.3m up from the shoulder"), not world coordinates. The current
+world-frame convention has no place for an egocentric command target.
+
+- **Surfaced by:** plan 006 design discussion (sense → true-3D). Verified against
+  the world-frame distance calc at `sense.py:383` and the floor-only AI2-THOR
+  motor set (`MoveAhead`/`RotateLeft`/`RotateRight`) in `ai2thor_spine.py`.
+- **Severity:** kernel-convention-level, but **not blocking the spike**. The
+  golden path is `go_to_object` (navigation, floor-plane, world-frame — works).
+  `task.pickup` is unsupported even on MiniGrid, so manipulation is out of scope
+  to build here. This is filed as a forward bend, not resolved.
+- **Triage for Phase 15+:** if/when manipulation lands, decide whether the kernel
+  stays world-frame with the adapter/spine doing world→body-relative conversion
+  internally (preferred — keeps the kernel substrate-independent, mirrors how the
+  MiniGrid spine already converts world `target_location` to motor primitives), or
+  whether an egocentric command frame becomes a first-class kernel concept.
+- **Status:** open (forward finding; do not resolve in the boundary spike).
