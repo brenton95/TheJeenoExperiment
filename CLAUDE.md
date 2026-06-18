@@ -128,6 +128,7 @@ Utterance
 8. **Synthesized primitives are validated before registration.** A validation failure returns an honest operator message; nothing is registered or executed.
 9. Work capability by capability. For every implementation task: state the phase, state the capability, state files touched, state success criteria, add or update a regression test.
 10. If a change breaks the golden path, stop and fix that before adding new features.
+11. **Build substrate-honest — guard only what the substrate can produce.** Adapter code (spine, sense) handles the failure modes its substrate actually generates, not failure modes imported from other substrates or from general robotics theory. Operational test: *if this substrate can't produce the failure, don't guard it* (e.g. AI2-THOR `MoveAhead` is all-or-nothing — no partial-travel/drift, so no progress-checker). Cross-check against the MiniGrid spine: if we wouldn't build it there, justify why this substrate genuinely needs it.
 
 ## Current Phase
 
