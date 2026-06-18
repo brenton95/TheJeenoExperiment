@@ -291,7 +291,12 @@ never fakes `succeeded`.
 - **Triage for Phase 15:** frame against ORPI's existing `postcondition_primitive`
   concept (§9.3). Success should be determined by a postcondition sense check, not
   a reward signal. Consider making success-determination pluggable per substrate.
-- **Status:** open.
+- **Status:** resolved (adapter-side, plan 005). `Ai2thorSpine._navigate()` checks
+  postcondition proximity (`euclidean(agent_floor, target_floor) <= gridSize*1.5`)
+  after executing the planned path. Returns `succeeded` only when the agent is
+  within reach of the target; otherwise `failed` with `postcondition_not_met`.
+  No reward signal used. The kernel concept of a pluggable `postcondition_primitive`
+  (§9.3) remains a Phase 15 generalization target.
 
 ### F4 — `primitive_library.py` motor primitives are MiniGrid-shaped (primitive library)
 
@@ -325,7 +330,11 @@ stubs these as `(0, 0)` via `WorldModelSample.grid_size=None`, which
 - **Triage for Phase 15:** either make `grid_width/height` optional in
   `SceneModel` (kernel edit), or define a projected occupancy grid for AI2-THOR
   derived from `GetReachablePositions` (adapter-side, plan 005 territory).
-- **Status:** open.
+- **Status:** confirmed non-blocking (plan 005). AI2-THOR nav uses
+  `GetReachablePositions` as the reachability source and BFS over that set — it
+  never reads `grid_width/height` or does bounds checking. The `(0,0)` stub is
+  fine with no kernel edit. The schema-level leak remains a Phase 15 cleanup
+  target (make `grid_width/height` optional or substrate-adaptive).
 
 ### F6 — Coordinate frame is world-absolute; manipulation will need height + body-relative commands (kernel convention)
 

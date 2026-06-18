@@ -7,7 +7,7 @@ import pytest
 from jeenom.ai2thor_domain_helper import Ai2thorDomainHelper
 from jeenom.ai2thor_operational_context import Ai2thorOperationalContext
 from jeenom.ai2thor_sense import Ai2thorSense
-from jeenom.ai2thor_spine import AI2THOR_ACTIONS, Ai2thorSpine
+from jeenom.ai2thor_spine import AI2THOR_ACTIONS, Ai2thorSpine, GRID_SIZE, _quantize_point
 from jeenom.ai2thor_substrate_adapter import (
     Ai2thorSubstrateAdapter,
     build_ai2thor_runtime_package,
@@ -376,3 +376,225 @@ def test_sense_coord_preserves_float_precision() -> None:
     assert abs(tx - 1.5) < 0.01
     assert abs(ty - 3.7) < 0.01
     assert len(sample.target_location) == 2
+
+
+# ── Navigation tests (plan 005) ─────────────────────────────────────────
+
+
+def _make_reachable_grid(
+    x_range: range,
+    z_range: range,
+    grid_size: float = GRID_SIZE,
+) -> list[dict[str, float]]:
+    """Build a canned GetReachablePositions return in AI2-THOR coords."""
+    return [
+        {"x": x * grid_size, "y": 0.0, "z": z * grid_size}
+        for x in x_range
+        for z in z_range
+    ]
+
+
+class _NavMockController:
+    """Mock controller that tracks agent position and returns canned reachable positions."""
+
+    def __init__(
+        self,
+        reachable_points: list[dict[str, float]],
+        agent_x: float = 0.0,
+        agent_z: float = 0.0,
+        agent_yaw: float = 0.0,
+    ) -> None:
+        self.reachable_points = reachable_points
+        self.agent_x = agent_x
+        self.agent_z = agent_z
+        self.agent_yaw = agent_yaw
+        self.calls: list[dict[str, Any]] = []
+
+    def step(self, **kwargs: Any) -> _FakeEvent:
+        self.calls.append(kwargs)
+        action = kwargs.get("action", "")
+
+        if action == "GetReachablePositions":
+            return _FakeEvent(metadata={"actionReturn": self.reachable_points})
+
+        if action == "MoveAhead":
+            yaw = int(self.agent_yaw) % 360
+            if yaw == 0:
+                self.agent_z += GRID_SIZE
+            elif yaw == 90:
+                self.agent_x += GRID_SIZE
+            elif yaw == 180:
+                self.agent_z -= GRID_SIZE
+            elif yaw == 270:
+                self.agent_x -= GRID_SIZE
+        elif action == "RotateRight":
+            self.agent_yaw = (self.agent_yaw + 90) % 360
+        elif action == "RotateLeft":
+            self.agent_yaw = (self.agent_yaw - 90) % 360
+
+        return _FakeEvent(metadata={
+            "objects": [],
+            "agent": {
+                "position": {"x": self.agent_x, "y": 0.0, "z": self.agent_z},
+                "rotation": {"x": 0.0, "y": self.agent_yaw, "z": 0.0},
+            },
+        })
+
+
+def test_nav_plans_path_and_succeeds() -> None:
+    """Agent at (0,0) facing +jy (yaw=0), apple at (0.5, 0.5).
+    Reachable grid 0..3 x 0..3 (quantized). Agent should navigate to a cell
+    adjacent to the apple and report succeeded."""
+    reachable = _make_reachable_grid(range(4), range(4))
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # target at JEENO (0.5, 0.5) — quantizes to (2, 2) with gridSize=0.25
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.5, 0.5),
+    })
+    contract = ExecutionContract(skill="navigate_to_object", params={"object_type": "apple"})
+
+    report, context, plan, cache_meta = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded", f"expected succeeded, got {report.status}: {report.reason}"
+    assert report.progress.get("actions") is not None
+    actions = report.progress["actions"]
+    assert all(a in ("move_forward", "turn_right", "turn_left") for a in actions)
+
+
+def test_nav_success_detection_already_adjacent() -> None:
+    """Agent already within reach of target → succeeded immediately, no movement."""
+    reachable = _make_reachable_grid(range(4), range(4))
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # agent at (0,0) in JEENO, target at (0.25, 0) — within REACH_THRESHOLD
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.25, 0.0),
+    })
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded"
+    assert report.progress.get("already_adjacent") is True
+    # No movement actions should have been dispatched
+    move_calls = [c for c in ctrl.calls if c.get("action") in ("MoveAhead", "RotateRight", "RotateLeft")]
+    assert len(move_calls) == 0
+
+
+def test_nav_unreachable_target_fails_honestly() -> None:
+    """Target surrounded by no reachable cells → no_reachable_goal_adjacent_to_target."""
+    # Only agent's position is reachable — nothing near the target
+    reachable = [{"x": 0.0, "y": 0.0, "z": 0.0}]
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (5.0, 5.0),
+    })
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "failed"
+    assert "no_reachable_goal" in (report.reason or "")
+
+
+def test_nav_no_path_found_fails_honestly() -> None:
+    """Goal cells exist but are disconnected from agent → no_path_found."""
+    # Agent at (0,0), target at (2.0, 0.0) with a gap: reachable = {(0,0), (8,0)}
+    reachable = [
+        {"x": 0.0, "y": 0.0, "z": 0.0},
+        {"x": 2.0, "y": 0.0, "z": 0.0},     # adjacent to target but disconnected
+    ]
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # target at JEENO (2.25, 0.0) → quantized (9, 0); adjacent cell (8, 0) is reachable but disconnected
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (2.25, 0.0),
+    })
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "failed"
+    assert report.reason == "no_path_found"
+
+
+def test_nav_action_sequence_straight_line() -> None:
+    """Agent faces +jy, target is directly ahead — should be pure move_forward actions."""
+    reachable = _make_reachable_grid(range(1), range(5))  # a column x=0, z=0..4
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # target at JEENO (0.0, 0.75) → quantized (0, 3); agent at (0, 0) facing yaw 0 (+jy)
+    # goal = adjacent to (0, 3) = (0, 2) (reachable). path = (0,0)->(0,1)->(0,2).
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.0, 0.75),
+    })
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded"
+    actions = report.progress["actions"]
+    # Already facing the right way, so no turns
+    assert all(a == "move_forward" for a in actions)
+    assert len(actions) == 2  # two steps: (0,0)->(0,1)->(0,2)
+
+
+def test_nav_action_sequence_requires_turn() -> None:
+    """Agent faces +jy (yaw 0) but target is to the right (+jx) — needs RotateRight first."""
+    reachable = _make_reachable_grid(range(5), range(1))  # a row z=0, x=0..4
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # target at JEENO (0.75, 0.0) → quantized (3, 0); agent at (0, 0).
+    # goal = adjacent to (3, 0) = (2, 0). path = (0,0)->(1,0)->(2,0).
+    # Agent faces yaw 0 (+jy), needs to face yaw 90 (+jx) → one turn_right.
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.75, 0.0),
+    })
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded"
+    actions = report.progress["actions"]
+    assert actions[0] == "turn_right"
+    assert actions.count("move_forward") == 2
+
+
+def test_nav_existing_motor_dispatch_unaffected() -> None:
+    """Existing single-action dispatch (move_forward, turn_right, etc.) still works."""
+    mock = _MockController()
+    spine = Ai2thorSpine(memory=None, controller=mock, compiler=None)
+
+    for skill, expected_action in AI2THOR_ACTIONS.items():
+        mock.calls.clear()
+        contract = ExecutionContract(skill=skill)
+        report, _, _, _ = spine.tick(contract)
+        assert report.status == "running"
+        assert len(mock.calls) == 1
+        assert mock.calls[0]["action"] == expected_action
+
+
+def test_nav_missing_percepts_fails() -> None:
+    """navigate_to_object without percepts → failed, not a crash."""
+    ctrl = _NavMockController([], agent_x=0.0, agent_z=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+    contract = ExecutionContract(skill="navigate_to_object")
+
+    report, _, _, _ = spine.tick(contract, percepts=None)
+
+    assert report.status == "failed"
+    assert report.reason == "no_percepts"
