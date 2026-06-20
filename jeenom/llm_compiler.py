@@ -260,7 +260,7 @@ class SmokeTestCompiler(CompilerBackend):
         normalized = instruction.strip().lower()
 
         door_match = re.search(
-            r"go to the (?P<color>\w+) (?P<object_type>door|key)",
+            r"go to the (?P<color>\w+) (?P<object_type>door|key|apple)",
             normalized,
         )
         if door_match:
@@ -602,7 +602,7 @@ class SmokeTestCompiler(CompilerBackend):
             color_pattern = r"red|green|blue|yellow|purple|grey|gray"
         door_match = re.search(
             rf"\b(?:go to|go the|reach|find|get to|head to|navigate to)\s+"
-            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door|key)\b",
+            rf"(?:the )?(?P<color>{color_pattern}) (?P<object_type>door|key|apple)\b",
             normalized,
         )
         _SUPERLATIVE_TERMS = frozenset([

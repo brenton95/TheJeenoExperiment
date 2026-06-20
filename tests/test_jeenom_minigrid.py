@@ -3799,5 +3799,82 @@ class JeenomPhase9BSubstrateContractTests(unittest.TestCase):
         self.assertIn("env.substrate_fingerprint", verdict.blocking_assumption_ids)
 
 
+class TestSmokeTestCompilerApple(unittest.TestCase):
+    """Plan 008 — SmokeTestCompiler compiles 'go to the red apple'."""
+
+    def _make_compiler(self):
+        return SmokeTestCompiler()
+
+    def _make_memory(self):
+        return OperationalMemory(root=Path(tempfile.mkdtemp()))
+
+    def test_apple_compiles_via_operator_intent(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        intent = compiler.compile_operator_intent("go to the red apple", memory=memory)
+        self.assertEqual(intent.intent_type, "task_instruction")
+        self.assertEqual(intent.task_type, "go_to_object")
+        self.assertEqual(intent.required_capabilities, ["task.go_to_object.apple"])
+
+    def test_apple_compiles_via_compile_task(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        task = compiler.compile_task(
+            "go to the red apple",
+            available_task_primitives=__import__(
+                "jeenom.primitive_library",
+                fromlist=["TASK_PRIMITIVES"],
+            ).TASK_PRIMITIVES,
+            memory=memory,
+        )
+        self.assertEqual(task.task_type, "go_to_object")
+        self.assertEqual(task.params["object_type"], "apple")
+        self.assertEqual(task.params["color"], "red")
+
+    def test_door_still_compiles_via_operator_intent(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        intent = compiler.compile_operator_intent("go to the red door", memory=memory)
+        self.assertEqual(intent.intent_type, "task_instruction")
+        self.assertEqual(intent.task_type, "go_to_object")
+        self.assertEqual(intent.required_capabilities, ["task.go_to_object.door"])
+
+    def test_key_still_compiles_via_operator_intent(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        intent = compiler.compile_operator_intent("go to the blue key", memory=memory)
+        self.assertEqual(intent.intent_type, "task_instruction")
+        self.assertEqual(intent.task_type, "go_to_object")
+        self.assertEqual(intent.required_capabilities, ["task.go_to_object.key"])
+
+    def test_door_still_compiles_via_compile_task(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        task = compiler.compile_task(
+            "go to the red door",
+            available_task_primitives=__import__(
+                "jeenom.primitive_library",
+                fromlist=["TASK_PRIMITIVES"],
+            ).TASK_PRIMITIVES,
+            memory=memory,
+        )
+        self.assertEqual(task.task_type, "go_to_object")
+        self.assertEqual(task.params["object_type"], "door")
+
+    def test_key_still_compiles_via_compile_task(self):
+        compiler = self._make_compiler()
+        memory = self._make_memory()
+        task = compiler.compile_task(
+            "go to the blue key",
+            available_task_primitives=__import__(
+                "jeenom.primitive_library",
+                fromlist=["TASK_PRIMITIVES"],
+            ).TASK_PRIMITIVES,
+            memory=memory,
+        )
+        self.assertEqual(task.task_type, "go_to_object")
+        self.assertEqual(task.params["object_type"], "key")
+
+
 if __name__ == "__main__":
     unittest.main()

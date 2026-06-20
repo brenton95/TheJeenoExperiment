@@ -378,3 +378,32 @@ world-frame convention has no place for an egocentric command target.
   MiniGrid spine already converts world `target_location` to motor primitives), or
   whether an egocentric command frame becomes a first-class kernel concept.
 - **Status:** open (forward finding; do not resolve in the boundary spike).
+
+### F7 — Compiler hardcodes `door`/`key` object types; non-MiniGrid objects don't compile (compiler)
+
+Both `SmokeTestCompiler` gates hardcode the navigable object vocabulary as
+`door|key`: `compile_operator_intent` (the operator-station entrypoint,
+`llm_compiler.py:605`) and `compile_task` (`llm_compiler.py:263`). An AI2-THOR
+utterance like "go to the red apple" therefore either fails to parse or, via
+`compile_task`, **silently misroutes** to `search_for_object`/`goal`
+(`llm_compiler.py:292-296`) with no error. The production `LLMCompiler` shares the
+coupling at the prompt layer — its system prompt instructs "go_to_object for door
+targets / non-door = unsupported" (`llm_compiler.py:~1694`), so even the LLM path
+treats non-door objects as unsupported by construction.
+
+- **Surfaced by:** AI2-THOR golden-path prep (plan 008). Verified by tracing the
+  operator-station entrypoint (`operator_station.py:664`) through both compiler
+  gates; the *return* side at `llm_compiler.py:1293-1305` is already parametric in
+  `object_type` — only the regex admittance and the LLM prompt are hardcoded.
+- **Severity:** compiler-level. Blocks the AI2-THOR golden path until the
+  `SmokeTestCompiler` gates admit `apple`. The `LLMCompiler` prompt coupling does
+  **not** block the spike (spike uses `SmokeTestCompiler`, no API key).
+- **Triage for Phase 15:** generalize the navigable-object vocabulary to be
+  substrate-driven (the Phase 8.5 "build regex dynamically from
+  `OPERATOR_OBJECT_TYPES`" TODO), and generalize the `LLMCompiler` system prompt so
+  object types are not enumerated as door-only. The output side is already
+  parametric, so this is admittance + prompt work, not a structural rewrite.
+- **Status:** partially addressed (plan 008). `SmokeTestCompiler` gates widened to
+  `door|key|apple` (hardcode — minimal change per AGENTS.md §2.2; dynamic-vocabulary
+  rewrite deferred to Phase 8.5). `LLMCompiler` prompt coupling **filed, not fixed**
+  (user decision 2026-06-20) — the spike uses `SmokeTestCompiler`.
