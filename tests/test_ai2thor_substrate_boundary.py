@@ -7,7 +7,7 @@ import pytest
 from jeenom.ai2thor_domain_helper import Ai2thorDomainHelper
 from jeenom.ai2thor_operational_context import Ai2thorOperationalContext
 from jeenom.ai2thor_sense import Ai2thorSense
-from jeenom.ai2thor_spine import AI2THOR_ACTIONS, Ai2thorSpine, GRID_SIZE, _quantize_point
+from jeenom.ai2thor_spine import AI2THOR_ACTIONS, Ai2thorSpine
 from jeenom.ai2thor_substrate_adapter import (
     Ai2thorSubstrateAdapter,
     build_ai2thor_runtime_package,
@@ -384,7 +384,7 @@ def test_sense_coord_preserves_float_precision() -> None:
 def _make_reachable_grid(
     x_range: range,
     z_range: range,
-    grid_size: float = GRID_SIZE,
+    grid_size: float = 0.25,
 ) -> list[dict[str, float]]:
     """Build a canned GetReachablePositions return in AI2-THOR coords."""
     return [
@@ -395,7 +395,12 @@ def _make_reachable_grid(
 
 
 class _NavMockController:
-    """Mock controller that tracks agent position and returns canned reachable positions."""
+    """Mock controller that tracks agent position and returns canned reachable positions.
+
+    Supports blocked cells: if a MoveAhead would land on a cell in
+    ``blocked_cells``, the agent stays put and ``lastActionSuccess`` is False.
+    Grid step is derived from reachable_points (same as the spine does).
+    """
 
     def __init__(
         self,
@@ -403,11 +408,15 @@ class _NavMockController:
         agent_x: float = 0.0,
         agent_z: float = 0.0,
         agent_yaw: float = 0.0,
+        blocked_cells: set[tuple[float, float]] | None = None,
+        grid_size: float = 0.25,
     ) -> None:
         self.reachable_points = reachable_points
         self.agent_x = agent_x
         self.agent_z = agent_z
         self.agent_yaw = agent_yaw
+        self.blocked_cells: set[tuple[float, float]] = blocked_cells or set()
+        self.grid_size = grid_size
         self.calls: list[dict[str, Any]] = []
 
     def step(self, **kwargs: Any) -> _FakeEvent:
@@ -417,22 +426,33 @@ class _NavMockController:
         if action == "GetReachablePositions":
             return _FakeEvent(metadata={"actionReturn": self.reachable_points})
 
+        last_action_success = True
+
         if action == "MoveAhead":
             yaw = int(self.agent_yaw) % 360
+            dx, dz = 0.0, 0.0
             if yaw == 0:
-                self.agent_z += GRID_SIZE
+                dz = self.grid_size
             elif yaw == 90:
-                self.agent_x += GRID_SIZE
+                dx = self.grid_size
             elif yaw == 180:
-                self.agent_z -= GRID_SIZE
+                dz = -self.grid_size
             elif yaw == 270:
-                self.agent_x -= GRID_SIZE
+                dx = -self.grid_size
+            new_x = round(self.agent_x + dx, 6)
+            new_z = round(self.agent_z + dz, 6)
+            if (new_x, new_z) in self.blocked_cells:
+                last_action_success = False
+            else:
+                self.agent_x = new_x
+                self.agent_z = new_z
         elif action == "RotateRight":
             self.agent_yaw = (self.agent_yaw + 90) % 360
         elif action == "RotateLeft":
             self.agent_yaw = (self.agent_yaw - 90) % 360
 
         return _FakeEvent(metadata={
+            "lastActionSuccess": last_action_success,
             "objects": [],
             "agent": {
                 "position": {"x": self.agent_x, "y": 0.0, "z": self.agent_z},
@@ -507,15 +527,19 @@ def test_nav_unreachable_target_fails_honestly() -> None:
 
 def test_nav_no_path_found_fails_honestly() -> None:
     """Goal cells exist but are disconnected from agent → no_path_found."""
-    # Agent at (0,0), target at (2.0, 0.0) with a gap: reachable = {(0,0), (8,0)}
+    # 0.25 grid: agent at (0,0), target at (2.0, 0.0).
+    # Only two reachable points with a huge gap between them — derived grid is 2.0.
+    # Use a proper grid so derive_grid_size = 0.25, then create a disconnection.
+    # Agent row: x=0..0.75, z=0.  Far island: x=2.0, z=0.  Gap at x=1.0..1.75.
     reachable = [
-        {"x": 0.0, "y": 0.0, "z": 0.0},
-        {"x": 2.0, "y": 0.0, "z": 0.0},     # adjacent to target but disconnected
+        {"x": i * 0.25, "y": 0.0, "z": 0.0} for i in range(4)  # 0.0..0.75
+    ] + [
+        {"x": 2.0, "y": 0.0, "z": 0.0},  # isolated island near target
     ]
     ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
     spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
 
-    # target at JEENO (2.25, 0.0) → quantized (9, 0); adjacent cell (8, 0) is reachable but disconnected
+    # target at JEENO (2.25, 0.0) → quantized (9, 0); adjacent cell (8, 0) reachable but disconnected
     percepts = Percepts(cues={
         "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
         "target_location": (2.25, 0.0),
@@ -598,3 +622,156 @@ def test_nav_missing_percepts_fails() -> None:
 
     assert report.status == "failed"
     assert report.reason == "no_percepts"
+
+
+# ── Closed-loop navigation tests (plan 007) ────────────────────────────
+
+
+def test_nav_blocked_move_replans_and_succeeds() -> None:
+    """Agent's first path hits a blocked cell after some moves; re-plan from new
+    position finds an alternate route and succeeds."""
+    # 5x5 grid.  Agent at (0,0) facing yaw 0 (+jy).
+    # Target at (0.25, 0.75) — BFS finds path going +jy then +jx.
+    # Block (0.0, 0.5) so after the agent moves to (0, 0.25), the next MoveAhead
+    # into (0, 0.5) fails.  Re-plan from (0, 0.25) can go +jx first, then +jy
+    # to reach a goal adjacent to target.
+    reachable = _make_reachable_grid(range(5), range(5))
+    blocked = {(0.0, 0.5)}
+    ctrl = _NavMockController(
+        reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0,
+        blocked_cells=blocked,
+    )
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.25, 0.75),
+    })
+    contract = ExecutionContract(skill="navigate_to_object", params={"object_type": "apple"})
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded", f"expected succeeded, got {report.status}: {report.reason}"
+
+
+def test_nav_genuinely_stuck_fails_honestly() -> None:
+    """Target boxed off after a block — spine reports navigation_blocked, no hang."""
+    # Tiny grid: agent at (0,0), only path to target goes through (0.25, 0) which is blocked
+    reachable = [
+        {"x": 0.0, "y": 0.0, "z": 0.0},
+        {"x": 0.25, "y": 0.0, "z": 0.0},
+        {"x": 0.5, "y": 0.0, "z": 0.0},
+    ]
+    blocked = {(0.25, 0.0)}  # blocks the only corridor
+    ctrl = _NavMockController(
+        reachable, agent_x=0.0, agent_z=0.0, agent_yaw=90.0,
+        blocked_cells=blocked,
+    )
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # Target at (0.75, 0.0) — adjacent goal is (0.5, 0.0) but path is blocked
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 90},
+        "target_location": (0.75, 0.0),
+    })
+    contract = ExecutionContract(skill="navigate_to_object", params={"object_type": "apple"})
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "failed"
+    assert report.reason == "navigation_blocked"
+
+
+def test_nav_step_budget_exceeded() -> None:
+    """Re-plan path longer than initial budget → navigation_step_budget_exceeded.
+
+    Budget = max(4 * len(initial_path), 20). We build a grid where the direct
+    path is short (budget stays small) but after a block the only detour exceeds it.
+    """
+    gs = 0.25
+    # Two parallel columns connected at the bottom:
+    #   col A: x=0, z=0..2   (agent at z=0, target near z=2)
+    #   col B: x=0.25, z=0..2
+    #   bottom row connecting them: already shared at z=0
+    # This gives direct path (0,0)→(0,1)→(0,2) = 3 nodes → budget=max(12,20)=20.
+    #
+    # For the detour to exceed budget, we need a much longer path.
+    # Build: col A x=0 z=0..2, long row at z=0 from x=0 to x=3.0 (12 cells),
+    # col B at x=3.0 z=0..2.
+    col_a = [{"x": 0.0, "y": 0.0, "z": z * gs} for z in range(3)]
+    row = [{"x": x * gs, "y": 0.0, "z": 0.0} for x in range(1, 13)]
+    col_b = [{"x": 12 * gs, "y": 0.0, "z": z * gs} for z in range(1, 3)]
+    # Connect top: x=12*0.25=3.0 at z=0.5 back to target area
+    # Add a bridge at z=0.5 from x=3.0 back to x=0.25 (near target)
+    bridge = [{"x": x * gs, "y": 0.0, "z": 2 * gs} for x in range(1, 13)]
+    reachable = col_a + row + col_b + bridge
+
+    blocked = {(0.0, gs)}  # block (0, 0.25) — first move
+    ctrl = _NavMockController(
+        reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0,
+        blocked_cells=blocked, grid_size=gs,
+    )
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # Target at (0.0, 0.75) → quantized (0, 3). Adjacent: (0,2) in col_a.
+    # Direct BFS: (0,0)→(0,1)→(0,2) = 3 nodes, budget=max(12,20)=20.
+    # Block at (0,1). Re-plan excluding (0,1): detour east along z=0,
+    # up col B, west along z=2 bridge back to (1,2) adjacent to (0,2).
+    # Path: (0,0)→(1,0)→...→(12,0)→(12,1)→(12,2)→(11,2)→...→(1,2) = 25 nodes.
+    # Actions: turn_right + 11*move_fwd + turn_left + move_fwd + turn_left + 11*move_fwd
+    #        = 3 turns + 23 moves = 26 actions. Budget=20 → exceeded.
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.0, 0.75),
+    })
+    contract = ExecutionContract(skill="navigate_to_object", params={"object_type": "apple"})
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "failed"
+    assert report.reason == "navigation_step_budget_exceeded"
+
+
+def test_nav_derived_grid_spacing() -> None:
+    """Grid at 0.1 spacing (not 0.25) — proves spacing is derived, not assumed."""
+    grid_size = 0.1
+    reachable = _make_reachable_grid(range(10), range(10), grid_size=grid_size)
+    ctrl = _NavMockController(
+        reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0,
+        grid_size=grid_size,
+    )
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None)
+
+    # Target at (0.0, 0.55) in JEENO coords — at 0.1 step, quantized to (0, 5.5)→(0, 6)
+    # adjacent goals at (0, 5) etc.  Agent should navigate there.
+    percepts = Percepts(cues={
+        "agent_pose": {"x": 0.0, "y": 0.0, "z": 0.0, "dir": 0},
+        "target_location": (0.0, 0.55),
+    })
+    contract = ExecutionContract(skill="navigate_to_object", params={"object_type": "apple"})
+
+    report, _, _, _ = spine.tick(contract, percepts)
+
+    assert report.status == "succeeded", f"expected succeeded, got {report.status}: {report.reason}"
+    assert spine.grid_size == pytest.approx(grid_size, abs=1e-6)
+
+
+def test_nav_rotation_step_param() -> None:
+    """Constructing Ai2thorSpine(rotate_step=90) — _turn_actions uses the param."""
+    reachable = _make_reachable_grid(range(5), range(1))
+    ctrl = _NavMockController(reachable, agent_x=0.0, agent_z=0.0, agent_yaw=0.0)
+    spine = Ai2thorSpine(memory=None, controller=ctrl, compiler=None, rotate_step=90)
+
+    assert spine.rotate_step == 90
+
+    # Agent faces yaw 0, needs yaw 90 → one turn_right (90° step)
+    turns = spine._turn_actions(0, 90)
+    assert turns == ["turn_right"]
+
+    # 180° → two turn_rights
+    turns = spine._turn_actions(0, 180)
+    assert turns == ["turn_right", "turn_right"]
+
+    # 270° → one turn_left
+    turns = spine._turn_actions(0, 270)
+    assert turns == ["turn_left"]

@@ -13,10 +13,6 @@ AI2THOR_ACTIONS: dict[str, str] = {
     "turn_left": "RotateLeft",
 }
 
-GRID_SIZE: float = 0.25
-ROTATE_STEP: int = 90
-REACH_THRESHOLD: float = GRID_SIZE * 1.5
-
 # AI2-THOR yaw → JEENO floor-plane (jx, jy) movement vectors.
 # yaw 0 → +z (AI2-THOR) → +jy; yaw 90 → +x → +jx; etc.
 _YAW_TO_FLOOR_VEC: dict[int, tuple[int, int]] = {
@@ -27,21 +23,37 @@ _YAW_TO_FLOOR_VEC: dict[int, tuple[int, int]] = {
 }
 
 
-def _quantize(value: float) -> int:
-    return round(value / GRID_SIZE)
+def _derive_grid_size(raw_points: list[dict[str, Any]]) -> float:
+    """Derive the grid step from GetReachablePositions raw float coords.
 
+    Returns the minimum nonzero pairwise distance — this *is* the substrate's
+    actual grid spacing. O(n²) but cached and only called once per episode.
+    """
+    if len(raw_points) < 2:
+        return 0.25  # fallback for degenerate/single-point sets
 
-def _quantize_point(jx: float, jy: float) -> tuple[int, int]:
-    return (_quantize(jx), _quantize(jy))
+    coords = [(float(p["x"]), float(p["z"])) for p in raw_points]
+    min_dist = float("inf")
+    eps = 1e-6
+    # Check neighbors — BFS-connected grids have neighbors in the first N points
+    for i, (ax, az) in enumerate(coords):
+        for bx, bz in coords[i + 1 :]:
+            d = ((ax - bx) ** 2 + (az - bz) ** 2) ** 0.5
+            if d > eps and d < min_dist:
+                min_dist = d
+    if min_dist == float("inf"):
+        return 0.25
+    return min_dist
 
 
 class Ai2thorSpine:
-    """Motor dispatch + navigation for AI2-THOR.
+    """Motor dispatch + closed-loop navigation for AI2-THOR.
 
     Motor dispatch (plan 003) maps single JEENO primitives to controller.step()
-    calls. Navigation (plan 005) plans a floor-plane path from agent to target
-    via BFS over GetReachablePositions, converts to action sequences, and detects
-    task success via a postcondition proximity check (resolves F3).
+    calls. Navigation (plan 007) plans a floor-plane path via BFS over
+    GetReachablePositions, executes actions one-at-a-time checking
+    lastActionSuccess, and re-plans once on a blocked move. Grid spacing is
+    derived from the substrate; rotation step is injected config.
 
     Controller is injected, enabling mock-based testing without Unity.
     """
@@ -52,13 +64,27 @@ class Ai2thorSpine:
         controller: Any,
         compiler: Any,
         plan_cache: Any = None,
+        rotate_step: int = 90,
     ) -> None:
         self.memory = memory
         self.controller = controller
         self.compiler = compiler
         self.plan_cache = plan_cache
+        self.rotate_step = rotate_step
         self.active_skill: str | None = None
         self._reachable_set: set[tuple[int, int]] | None = None
+        self._grid_size: float | None = None
+
+    @property
+    def grid_size(self) -> float:
+        if self._grid_size is None:
+            self._get_reachable_positions()
+        assert self._grid_size is not None
+        return self._grid_size
+
+    @property
+    def reach_threshold(self) -> float:
+        return self.grid_size * 1.5
 
     def tick(
         self,
@@ -79,7 +105,7 @@ class Ai2thorSpine:
         elif skill == "navigate_to_object":
             report = self._navigate(execution_contract, percepts)
         elif skill in AI2THOR_ACTIONS:
-            report = self._execute_env_action(skill)
+            report = self._motor_dispatch(skill)
         else:
             report = ExecutionReport(
                 status="failed",
@@ -102,7 +128,7 @@ class Ai2thorSpine:
         }
         return report, context, plan, cache_meta
 
-    # ── Navigation (plan 005) ────────────────────────────────────────────
+    # ── Navigation (plan 007 — closed-loop) ─────────────────────────────
 
     def _navigate(
         self,
@@ -131,7 +157,6 @@ class Ai2thorSpine:
         agent_floor = (float(agent_pose["x"]), float(agent_pose["y"]))
         target_floor = (float(target_location[0]), float(target_location[1]))
 
-        # Already adjacent?
         if self._is_adjacent(agent_floor, target_floor):
             return ExecutionReport(
                 status="succeeded",
@@ -144,8 +169,8 @@ class Ai2thorSpine:
                 source="spine",
             )
 
-        agent_q = _quantize_point(*agent_floor)
-        target_q = _quantize_point(*target_floor)
+        agent_q = self._quantize_point(*agent_floor)
+        target_q = self._quantize_point(*target_floor)
 
         goals = self._navigation_goals(target_q, reachable)
         if not goals:
@@ -186,10 +211,110 @@ class Ai2thorSpine:
         agent_yaw = int(agent_pose.get("dir", 0)) % 360
         actions = self._path_to_actions(path, agent_yaw)
 
-        for action_name in actions:
-            self._execute_env_action(action_name)
+        max_actions = max(4 * len(path), 20)
+        total_executed: list[str] = []
 
-        # Postcondition: check proximity after executing the full path.
+        for action_name in actions:
+            if len(total_executed) >= max_actions:
+                return ExecutionReport(
+                    status="failed",
+                    reason="navigation_step_budget_exceeded",
+                    progress={
+                        "contract": execution_contract.skill,
+                        "total_executed": total_executed,
+                        "budget": max_actions,
+                    },
+                    source="spine",
+                )
+
+            success, event_meta = self._execute_env_action_raw(action_name)
+            total_executed.append(action_name)
+
+            if not success and action_name == "move_forward":
+                # Re-read actual pose from metadata and re-plan once
+                actual_pos = event_meta.get("agent", {}).get("position", {})
+                actual_rot = event_meta.get("agent", {}).get("rotation", {})
+                actual_jx = geometry.as_coord(actual_pos.get("x", 0.0))
+                actual_jy = geometry.as_coord(actual_pos.get("z", 0.0))
+                actual_yaw = int(actual_rot.get("y", 0)) % 360
+
+                new_q = self._quantize_point(float(actual_jx), float(actual_jy))
+                # Exclude the cell that just blocked us
+                blocked_jx, blocked_jy = self._blocked_cell_ahead(
+                    float(actual_jx), float(actual_jy), actual_yaw,
+                )
+                blocked_q = self._quantize_point(blocked_jx, blocked_jy)
+                replan_reachable = reachable - {blocked_q}
+                new_path = self._bfs_path(new_q, goals, replan_reachable)
+                if not new_path or len(new_path) < 2:
+                    return ExecutionReport(
+                        status="failed",
+                        reason="navigation_blocked",
+                        progress={
+                            "contract": execution_contract.skill,
+                            "total_executed": total_executed,
+                            "replan_failed": True,
+                        },
+                        source="spine",
+                    )
+                new_actions = self._path_to_actions(new_path, actual_yaw)
+                return self._execute_remaining(
+                    new_actions, execution_contract,
+                    target_floor, total_executed, max_actions,
+                )
+
+        return self._postcondition_check(
+            execution_contract, target_floor, total_executed, actions,
+        )
+
+    def _execute_remaining(
+        self,
+        actions: list[str],
+        execution_contract: Any,
+        target_floor: tuple[float, float],
+        total_executed: list[str],
+        max_actions: int,
+    ) -> ExecutionReport:
+        """Execute a re-planned action list. No further re-planning allowed."""
+        for action_name in actions:
+            if len(total_executed) >= max_actions:
+                return ExecutionReport(
+                    status="failed",
+                    reason="navigation_step_budget_exceeded",
+                    progress={
+                        "contract": execution_contract.skill,
+                        "total_executed": total_executed,
+                        "budget": max_actions,
+                    },
+                    source="spine",
+                )
+
+            success, _ = self._execute_env_action_raw(action_name)
+            total_executed.append(action_name)
+
+            if not success and action_name == "move_forward":
+                return ExecutionReport(
+                    status="failed",
+                    reason="navigation_blocked",
+                    progress={
+                        "contract": execution_contract.skill,
+                        "total_executed": total_executed,
+                        "blocked_after_replan": True,
+                    },
+                    source="spine",
+                )
+
+        return self._postcondition_check(
+            execution_contract, target_floor, total_executed, actions,
+        )
+
+    def _postcondition_check(
+        self,
+        execution_contract: Any,
+        target_floor: tuple[float, float],
+        total_executed: list[str],
+        actions: list[str],
+    ) -> ExecutionReport:
         final_event = self.controller.step(action="Done", renderImage=False)
         final_meta = final_event.metadata if hasattr(final_event, "metadata") else {}
         final_agent = final_meta.get("agent", {}).get("position", {})
@@ -202,8 +327,7 @@ class Ai2thorSpine:
                 status="succeeded",
                 progress={
                     "contract": execution_contract.skill,
-                    "path": path,
-                    "actions": actions,
+                    "actions": total_executed,
                     "final_floor": final_floor,
                     "target_floor": target_floor,
                 },
@@ -215,8 +339,7 @@ class Ai2thorSpine:
             reason="postcondition_not_met",
             progress={
                 "contract": execution_contract.skill,
-                "path": path,
-                "actions": actions,
+                "actions": total_executed,
                 "final_floor": final_floor,
                 "target_floor": target_floor,
                 "distance": geometry.euclidean(final_floor, target_floor),
@@ -230,12 +353,20 @@ class Ai2thorSpine:
 
         event = self.controller.step(action="GetReachablePositions", renderImage=False)
         raw_points = event.metadata.get("actionReturn", [])
-        # Project AI2-THOR {x, y, z} → JEENO floor (jx, jy) = (AThor.x, AThor.z), then quantize.
+
+        self._grid_size = _derive_grid_size(raw_points)
+
         self._reachable_set = {
-            _quantize_point(float(p["x"]), float(p["z"]))
+            self._quantize_point(float(p["x"]), float(p["z"]))
             for p in raw_points
         }
         return self._reachable_set
+
+    def _quantize(self, value: float) -> int:
+        return round(value / self.grid_size)
+
+    def _quantize_point(self, jx: float, jy: float) -> tuple[int, int]:
+        return (self._quantize(jx), self._quantize(jy))
 
     def _navigation_goals(
         self,
@@ -313,24 +444,38 @@ class Ai2thorSpine:
         diff = (desired_yaw - current_yaw) % 360
         if diff == 0:
             return []
-        if diff == 90:
+        if diff == self.rotate_step:
             return ["turn_right"]
-        if diff == 180:
+        if diff == 2 * self.rotate_step:
             return ["turn_right", "turn_right"]
-        if diff == 270:
+        if diff == 3 * self.rotate_step:
             return ["turn_left"]
-        # Non-90° step — shouldn't happen with default rotateStepDegrees=90
         return []
 
-    # ── Success detection (resolves F3) ──────────────────────────────────
+    def _blocked_cell_ahead(
+        self, jx: float, jy: float, yaw: int,
+    ) -> tuple[float, float]:
+        """Return the JEENO floor coord of the cell directly ahead of (jx, jy)."""
+        vec = _YAW_TO_FLOOR_VEC.get(yaw % 360, (0, 0))
+        return (jx + vec[0] * self.grid_size, jy + vec[1] * self.grid_size)
 
-    @staticmethod
-    def _is_adjacent(a: tuple[float, float], b: tuple[float, float]) -> bool:
-        return geometry.euclidean(a, b) <= REACH_THRESHOLD
+    def _is_adjacent(self, a: tuple[float, float], b: tuple[float, float]) -> bool:
+        return geometry.euclidean(a, b) <= self.reach_threshold
 
-    # ── Motor dispatch (plan 003 — unchanged) ────────────────────────────
+    # ── Motor dispatch (plan 003) ────────────────────────────────────────
 
-    def _execute_env_action(self, name: str) -> ExecutionReport:
+    def _execute_env_action_raw(self, name: str) -> tuple[bool, dict[str, Any]]:
+        """Execute an action and return (lastActionSuccess, event_metadata)."""
+        action_str = AI2THOR_ACTIONS.get(name)
+        if action_str is None:
+            return False, {}
+
+        event = self.controller.step(action=action_str, renderImage=False)
+        meta = event.metadata if hasattr(event, "metadata") else {}
+        success = meta.get("lastActionSuccess", True)
+        return success, meta
+
+    def _motor_dispatch(self, name: str) -> ExecutionReport:
         action_str = AI2THOR_ACTIONS.get(name)
         if action_str is None:
             return ExecutionReport(
