@@ -8,6 +8,7 @@ from .capability_matcher import default_matcher
 from .knowledge_base import KnowledgeBase, NamedConcept, derive_scope
 from .schemas import (
     ApprovedCommand,
+    ClarificationRequest,
     CorticalEnvelope,
     MissionExecutionPlan,
     PrimitiveDefinitionRequest,
@@ -44,6 +45,29 @@ def _normalize_utterance(utterance: str) -> str:
         text = stripped
 
 
+_NEW_INTENT_COMMAND_KINDS = {
+    "ambiguous",
+    "claim_reference",
+    "conditional_mission_execute",
+    "concept_forget",
+    "concept_teach",
+    "ground_target_query",
+    "knowledge_update",
+    "metric_query",
+    "mission_execute",
+    "motor_execute",
+    "motor_sequence_execute",
+    "primitive_definition",
+    "procedure_execute",
+    "sequence_execute",
+    "status_query",
+    "steering_directive",
+    "task_instruction",
+    "task_selector",
+    "unsupported",
+}
+
+
 @dataclass
 class PendingClarification:
     clarification_type: str
@@ -56,6 +80,7 @@ class PendingClarification:
     request_plan: RequestPlan | None = None
     readiness_graph: ReadinessGraph | None = None
     pending_envelope: CorticalEnvelope | None = None
+    clarification_request: ClarificationRequest | None = None
 
 
 @dataclass
@@ -410,6 +435,16 @@ class TurnOrchestrator:
             usteps = list(intent.utterance_steps or [])
             if not usteps:
                 return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
+            from .llm_compiler import _parse_motor_command as _pmc
+            motor_steps = [_pmc(step) for step in usteps]
+            if all(step is not None for step in motor_steps):
+                sequence = [
+                    {"action": str(action), "count": int(count)}
+                    for action, count in motor_steps
+                    if action is not None
+                ]
+                station.log(f"sequence_instruction resolved as motor_sequence: {len(sequence)} actions")
+                return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
             station.log(f"sequence_instruction: steps={usteps}")
             return _approved("sequence_execute", utterance, payload={"steps": usteps})
 
@@ -529,49 +564,58 @@ class TurnOrchestrator:
                 except ValueError:
                     continue
                 sequence.append({"action": action_name, "count": action_count})
-            if len(sequence) < 2:
+            # Execute any sequence with at least one parseable step — a single repeated action
+            # ("go forward twice" -> ["move_forward:2"]) is valid. Only zero parseable steps is
+            # genuinely unparseable. (The sequence_instruction path applies the same rule.)
+            if not sequence:
                 return _approved("clarification", utterance, "Could not parse motor sequence steps.")
             station.log(f"motor_sequence: {len(sequence)} actions")
             return _approved("motor_sequence_execute", utterance, payload={"sequence": sequence})
 
         if intent.intent_type == "conditional_sense_motor":
-            import uuid
-            cond_plan = RequestPlan(
-                request_id=f"conditional_sense_motor:{str(uuid.uuid4())[:8]}",
-                original_utterance=utterance,
-                objective_type="control",
-                objective_summary="Conditional motor: sense environment before actuation.",
-                steps=[
-                    RequestPlanStep(
-                        step_id="sense_condition",
-                        layer="sensing",
-                        operation="execute",
-                        inputs={"query": "scene"},
-                        outputs=["sense.front_cell"],
-                    ),
-                    RequestPlanStep(
-                        step_id="conditional_execute_motor",
-                        layer="action",
-                        operation="refuse",
-                        depends_on=["sense_condition"],
-                        inputs={"condition": utterance},
-                    ),
-                ],
-                expected_response="ask_clarification",
-            )
-            cond_graph = self.cortex_session.evaluate(
-                cond_plan,
+            target = intent.target or {}
+            if (
+                not target.get("color")
+                or not target.get("object_type")
+                or not intent.action_name
+                or intent.steering_directive is None
+            ):
+                return _approved(
+                    "clarification",
+                    utterance,
+                    "Conditional motor command requires Sense evidence before actuation. "
+                    "Please specify a visible target condition and the action to repeat.",
+                )
+            mission_plan = self.mission_cortex.plan_conditional_evidence_action(
+                intent,
+                utterance=utterance,
                 active_claims=station.active_claims,
                 claims_valid=station._claims_valid_for_current_environment(),
                 environment_identity=station.current_environment_identity,
             )
-            station.last_request_plan = cond_plan
-            station.last_readiness_graph = cond_graph
+            station.last_request_plan = mission_plan.request_plan
+            station.last_readiness_graph = mission_plan.readiness_graph
+            station._record_request_state(
+                request_plan=mission_plan.request_plan,
+                readiness_graph=mission_plan.readiness_graph,
+                reason="conditional_mission_planned",
+            )
+            if mission_plan.readiness_graph.graph_status != "executable":
+                return _approved(
+                    "clarification",
+                    utterance,
+                    (
+                        "Conditional mission is not executable: "
+                        f"{mission_plan.readiness_graph.explanation}"
+                    ),
+                )
             return _approved(
-                "clarification",
+                "conditional_mission_execute",
                 utterance,
-                "Conditional motor command requires Sense evidence before actuation. "
-                "Please confirm the condition and the fallback action.",
+                payload={"mission_plan": mission_plan},
+                request_id=mission_plan.request_plan.request_id,
+                request_plan=mission_plan.request_plan,
+                readiness_graph=mission_plan.readiness_graph,
             )
 
         if intent.intent_type == "mission_contract":
@@ -595,6 +639,12 @@ class TurnOrchestrator:
                 )
                 if readiness_command is not None:
                     return readiness_command
+                evidence_command = station._maybe_start_needs_evidence_clarification(
+                    utterance,
+                    intent,
+                )
+                if evidence_command is not None:
+                    return evidence_command
                 grounded = station.ground_target_selector(intent.target_selector)
                 if not grounded["ok"]:
                     if cap_match.verdict in {"missing_skills", "synthesizable", "unsupported"}:
@@ -627,7 +677,12 @@ class TurnOrchestrator:
                     )
                 color = intent.target.get("color")
                 object_type = intent.target.get("object_type")
-                if not color or object_type != "door" or intent.task_type != "go_to_object":
+                supported_object_types = set(station.planning_semantics.object_types)
+                if (
+                    not color
+                    or object_type not in supported_object_types
+                    or intent.task_type != "go_to_object"
+                ):
                     return ApprovedCommand(command_type="unsupported", utterance=utterance)
                 instruction = intent.canonical_instruction or f"go to the {color} {object_type}"
             else:
@@ -676,18 +731,23 @@ class TurnOrchestrator:
             # the registry says it is missing or synthesizable.
             if not intent.required_capabilities and not cap_match.missing:
                 reason = intent.reason or "I could not understand that request."
-                if intent.intent_type == "unsupported" and "unsupported" in reason.lower():
+                # Decide on STRUCTURED intent fields (the LLM's tool-call), not a substring
+                # search of its prose. A genuine capability gap carries
+                # capability_status="unsupported" → kind="unsupported"; a parse failure
+                # (compiler couldn't resolve the utterance) leaves the default status → it is
+                # an "I didn't understand" clarification, as is an `ambiguous` intent. The
+                # reason text may be the LLM's (helper text), but it never steers the routing.
+                if (
+                    intent.intent_type == "unsupported"
+                    and intent.capability_status == "unsupported"
+                ):
                     return ApprovedCommand(
                         kind="unsupported",
                         utterance=utterance,
                         payload={
-                            "message": (
-                                "I cannot safely execute that capability yet. "
-                                f"{reason}"
-                            )
+                            "message": f"I cannot safely execute that capability yet. {reason}"
                         },
                     )
-                reason = intent.reason or "I could not understand that request."
                 return _approved("clarification", utterance, f"I didn't understand that: {reason}")
             return station._arbitrate_gap(utterance, intent, cap_match)
 
@@ -732,6 +792,14 @@ class TurnOrchestrator:
             # path so IntentVerifier (the gate) validates and attaches the directive —
             # never via the deterministic fast path, which skips verification.
             command = station.command_from_llm_intent(residual)
+            if station.pending_clarification is not None:
+                pending_response = self.handle_pending_clarification(
+                    station,
+                    utterance,
+                    command,
+                )
+                if pending_response is not None:
+                    return pending_response
             return self.execute_command(station, command)
 
         # IntentCache fast path: regex patterns that produce OperatorIntent and route
@@ -745,6 +813,14 @@ class TurnOrchestrator:
                 else:
                     # ApprovedCommand from cache (error cases, e.g. unsafe formula)
                     command = cached
+                if station.pending_clarification is not None:
+                    pending_response = self.handle_pending_clarification(
+                        station,
+                        utterance,
+                        command,
+                    )
+                    if pending_response is not None:
+                        return pending_response
                 return self.execute_command(station, command)
 
         command = self.classify_utterance(utterance)
@@ -837,14 +913,7 @@ class TurnOrchestrator:
         if command.kind == "unresolved":
             station.log("deterministic fast path unresolved; compiling operator intent")
             command = station.command_from_llm_intent(utterance)
-        if command.kind in {
-            "task_instruction",
-            "task_selector",
-            "knowledge_update",
-            "ground_target_query",
-            "unsupported",
-            "ambiguous",
-        }:
+        if command.kind in _NEW_INTENT_COMMAND_KINDS:
             station.pending_clarification = None
             station.log("new operator intent cancelled pending clarification")
             return self.execute_command(station, command)
@@ -897,6 +966,8 @@ class TurnOrchestrator:
                 command.payload["sequence"],
                 command.utterance,
             )
+        if command.kind == "conditional_mission_execute":
+            return station._run_conditional_mission(command.payload["mission_plan"])
         if command.kind == "mission_execute":
             return station._run_mission(command.payload["steps"], command.utterance)
         if command.kind == "cache_query":

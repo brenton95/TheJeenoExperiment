@@ -59,6 +59,7 @@ from .turn_orchestrator import (
 from .schemas import (
     ApprovedCommand,
     ArbitrationTrace,
+    ClarificationRequest,
     CommandResult,
     CorticalEnvelope,
     EnvironmentIdentity,
@@ -161,9 +162,16 @@ def _approved(
     return ApprovedCommand(command_type=command_type, utterance=utterance, payload=p, **kwargs)
 
 
-def classify_utterance(utterance: str, registry: CapabilityRegistry) -> ApprovedCommand:
+def classify_utterance(
+    utterance: str,
+    registry: CapabilityRegistry,
+    *,
+    domain_helper: Any | None = None,
+    planning_semantics: PlanningSemantics | None = None,
+) -> ApprovedCommand:
     text = utterance.strip()
     normalized = _normalize_utterance(text)
+    helper = domain_helper or _DEFAULT_DOMAIN_HELPER
 
     if normalized in {"quit", "exit", "bye"}:
         return ApprovedCommand(command_type="quit", utterance=text)
@@ -258,7 +266,11 @@ def classify_utterance(utterance: str, registry: CapabilityRegistry) -> Approved
     # Inline metric definition + mission (e.g. "go to door closest by my_metric = min(...)").
     # Pure metric-definition patterns are handled via IntentCache before classify_utterance;
     # only the combined inline case lands here.
-    inline_metric = parse_inline_metric_request(text, registry)
+    inline_metric = parse_inline_metric_request(
+        text,
+        registry,
+        planning_semantics=planning_semantics,
+    )
     if isinstance(inline_metric, InlineMetricMissionRequest):
         return _approved(
             "primitive_definition",
@@ -283,19 +295,29 @@ def classify_utterance(utterance: str, registry: CapabilityRegistry) -> Approved
     }:
         return ApprovedCommand(command_type="status_query", utterance=text, payload={"query": "concepts"})
 
-    target_fact = _parse_target_fact(normalized)
+    target_fact = helper.parse_target_fact(normalized)
     if target_fact is not None:
         return ApprovedCommand(command_type="knowledge_update", utterance=text, payload=target_fact)
 
-    if _parse_exact_go_to_object_utterance(normalized) is not None:
+    if helper.parse_exact_go_to_object_utterance(normalized) is not None:
         return ApprovedCommand(command_type="task_instruction", utterance=text)
 
     return ApprovedCommand(command_type="unresolved", utterance=text)
 
 
-def _make_classify_utterance(registry: CapabilityRegistry):
+def _make_classify_utterance(
+    registry: CapabilityRegistry,
+    *,
+    domain_helper: Any | None = None,
+    planning_semantics: PlanningSemantics | None = None,
+):
     """Return a classify_utterance callable bound to a specific registry instance."""
-    return lambda utterance: classify_utterance(utterance, registry)
+    return lambda utterance: classify_utterance(
+        utterance,
+        registry,
+        domain_helper=domain_helper,
+        planning_semantics=planning_semantics,
+    )
 
 
 def _parse_target_fact(normalized: str) -> dict[str, str] | None:
@@ -351,10 +373,15 @@ class OperatorStationSession:
         self.context_fingerprint = self.operational_context.fingerprint()
         self.domain_helper = self.runtime_package.domain_helper
         self.planning_semantics = PlanningSemantics(self.operational_context)
+        self.compiler.bind_planning_semantics(self.planning_semantics)
         self.intent_verifier = IntentVerifier(planning_semantics=self.planning_semantics)
         self.substrate: SubstrateAdapter = self.runtime_package.substrate
         self.capability_registry = self.runtime_package.resolve_capability_registry()
-        self._classify_utterance = _make_classify_utterance(self.capability_registry)
+        self._classify_utterance = _make_classify_utterance(
+            self.capability_registry,
+            domain_helper=self.domain_helper,
+            planning_semantics=self.planning_semantics,
+        )
         self.mission_cortex = MissionCortex(
             planning_semantics=self.planning_semantics,
             registry=self.capability_registry,
@@ -397,6 +424,7 @@ class OperatorStationSession:
             self.plan_cache,
         )
         self.prewarm_compiler = SmokeTestCompiler()
+        self.prewarm_compiler.bind_planning_semantics(self.planning_semantics)
         self.prewarm_cortex = Cortex(
             self.memory,
             self.prewarm_compiler,
@@ -419,6 +447,7 @@ class OperatorStationSession:
         self.arbitrator: ArbitratorBackend = build_arbitrator(compiler_name)
         self.synthesizer: SynthesizerBackend = build_synthesizer(compiler_name)
         self.validator: PrimitiveValidator = default_validator
+        self.last_clarification_request: ClarificationRequest | None = None
 
     @property
     def active_claims(self) -> StationActiveClaims | None:
@@ -562,10 +591,22 @@ class OperatorStationSession:
             base["object_vocabulary"] = manifest_dict.get("object_vocabulary", [])
         return base
 
-    def _budget_failure_outcome(self) -> FailureOutcome | None:
-        """Phase 13A: a budget-exhausted episode surfaces as a typed FailureOutcome so the
-        LabelledEpisode attributes it to the steering authority limit, not a substrate fault."""
+    def _task_failure_outcome(self) -> FailureOutcome | None:
+        """Project bounded runtime failures into the typed episode attribution surface."""
         if not getattr(self, "_turn_budget_exhausted", False):
+            final_state = (
+                self.last_result.get("final_state", {})
+                if isinstance(self.last_result, dict)
+                else {}
+            )
+            if final_state.get("failure_reason") == "no_progress":
+                return FailureOutcome(
+                    category="stuck",
+                    detail=(
+                        "Conditional mission halted because the authorized action "
+                        "did not change the sensed agent pose."
+                    ),
+                )
             return None
         return FailureOutcome(
             category="budget_exhausted",
@@ -605,11 +646,16 @@ class OperatorStationSession:
                     if self.pending_primitive_definition is not None
                     else None
                 ),
+                "clarification_request": (
+                    self.last_clarification_request.as_dict()
+                    if self.last_clarification_request is not None
+                    else None
+                ),
                 "knowledge_writes": self.knowledge_channel.consume_write_events(),
                 "kb_reuse_counters": self.knowledge_channel.consume_reuse_counters(),
             },
             last_result=self.last_result,
-            failure_outcome=self._budget_failure_outcome(),
+            failure_outcome=self._task_failure_outcome(),
         )
         self.last_cortical_envelope = command_result.envelope
         self.last_approved_command = command_result.command
@@ -634,6 +680,7 @@ class OperatorStationSession:
         self.last_cortical_envelope = None
         self.last_approved_command = None
         self.last_command_result = None
+        self.last_clarification_request = None
         # Phase 13A: steering attached this turn (set in dispatch after verification);
         # budget exhaustion is scoped to this turn so a stale last_result never leaks
         # a FailureOutcome into a later non-task turn.
@@ -727,12 +774,18 @@ class OperatorStationSession:
         claims_valid = self._claims_valid_for_current_environment()
 
         # Build plan and initial readiness through cortex_session (no LLM calls).
+        evidence_state = (
+            self._current_evidence_state()
+            if intent.grounding_query_plan is not None or intent.target_selector is not None
+            else None
+        )
         fresh_plan, readiness_graph = self.cortex_session.plan(
             utterance,
             intent,
             active_claims=self.active_claims,
             claims_valid=claims_valid,
             environment_identity=self.current_environment_identity,
+            evidence_state=evidence_state,
         )
 
         cacheable_plan = self._request_plan_is_reusable(fresh_plan)
@@ -766,6 +819,7 @@ class OperatorStationSession:
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
+                    evidence_state=evidence_state,
                 )
                 self.last_request_plan = fresh_plan
                 self.last_readiness_graph = readiness_graph
@@ -819,6 +873,7 @@ class OperatorStationSession:
                     active_claims=self.active_claims,
                     claims_valid=claims_valid,
                     environment_identity=self.current_environment_identity,
+                    evidence_state=evidence_state,
                 )
                 self.last_readiness_graph = readiness_graph
                 self._record_request_state(
@@ -841,8 +896,14 @@ class OperatorStationSession:
         utterance: str,
         instruction: str,
     ) -> None:
-        parsed = _parse_exact_go_to_object_utterance(instruction)
+        parsed = self.domain_helper.parse_exact_go_to_object_utterance(instruction)
         if parsed is None:
+            return
+        task_handle = self.planning_semantics.task_handle(
+            "go_to_object",
+            parsed["object_type"],
+        )
+        if task_handle is None:
             return
         intent = OperatorIntent(
             intent_type="task_instruction",
@@ -853,7 +914,7 @@ class OperatorStationSession:
                 "object_type": parsed["object_type"],
             },
             capability_status="executable",
-            required_capabilities=["task.go_to_object.door"],
+            required_capabilities=[task_handle],
             confidence=1.0,
             reason="Deterministic go-to-object task instruction.",
             steering_directive=getattr(self, "active_steering_directive", None),
@@ -861,9 +922,18 @@ class OperatorStationSession:
         self._record_request_plan(utterance, intent)
 
     def _task_intent_for_instruction(self, instruction: str) -> OperatorIntent:
-        parsed = _parse_exact_go_to_object_utterance(instruction)
+        parsed = self.domain_helper.parse_exact_go_to_object_utterance(instruction)
         if parsed is None:
             raise ValueError(f"Cannot build task execution ticket for {instruction!r}")
+        task_handle = self.planning_semantics.task_handle(
+            "go_to_object",
+            parsed["object_type"],
+        )
+        if task_handle is None:
+            raise ValueError(
+                "Cannot resolve task capability for "
+                f"object_type={parsed['object_type']!r}"
+            )
         return OperatorIntent(
             intent_type="task_instruction",
             canonical_instruction=instruction,
@@ -873,7 +943,7 @@ class OperatorStationSession:
                 "object_type": parsed["object_type"],
             },
             capability_status="executable",
-            required_capabilities=["task.go_to_object.door"],
+            required_capabilities=[task_handle],
             confidence=1.0,
             reason="Deterministic go-to-object task instruction.",
             steering_directive=getattr(self, "active_steering_directive", None),
@@ -973,6 +1043,29 @@ class OperatorStationSession:
             record_plan=record_plan,
         )
         return self._run_task_with_ticket(ticket)
+
+    def _run_conditional_mission(
+        self,
+        mission_plan: MissionExecutionPlan,
+    ) -> str:
+        contract = mission_plan.mission_contract
+        if contract is None or contract.procedure is None:
+            raise RuntimeError("Conditional mission requires an approved procedure")
+        ticket = self.side_effect_authority.issue_execution_ticket(
+            instruction=contract.description,
+            task_type=contract.procedure.task_type,
+            params=contract.params,
+            request_plan=mission_plan.request_plan,
+            readiness_graph=mission_plan.readiness_graph,
+            source="mission_cortex",
+            mission_id=mission_plan.mission_id,
+            parent_request_id=mission_plan.request_plan.request_id,
+            provenance=dict(mission_plan.provenance),
+            mission_contract=contract,
+        )
+        mission_plan.child_tickets.append(ticket)
+        result = self._run_task_with_ticket(ticket)
+        return self.result_summary(result)
 
     def _motor_intent_for_action(self, action_name: str, count: int) -> OperatorIntent:
         return OperatorIntent(
@@ -1440,7 +1533,14 @@ class OperatorStationSession:
             return geometry.euclidean(obj.coord, scene.agent_coord)
         fn = self.capability_registry.get_synthesized_callable(self.capability_registry.ranked_handle_for(metric))
         if fn is not None:
-            ranked = fn(scene, {"object_type": "door", "color": None, "exclude_colors": []})
+            ranked = fn(
+                scene,
+                {
+                    "object_type": obj.object_type,
+                    "color": None,
+                    "exclude_colors": [],
+                },
+            )
             for dist, candidate in ranked:
                 if candidate is obj or (
                     candidate.x == obj.x
@@ -1511,14 +1611,18 @@ class OperatorStationSession:
 
     def _ranker_for_metric_expression(self, expression: dict[str, Any]) -> Any:
         def _rank(scene: SceneModel, selector: dict[str, Any]) -> list[tuple[float, SceneObject]]:
-            doors = scene.find(
-                object_type=selector.get("object_type", "door"),
+            object_type = (
+                selector.get("object_type")
+                or self.planning_semantics.default_object_type
+            )
+            objects = scene.find(
+                object_type=object_type,
                 color=selector.get("color"),
                 exclude_colors=selector.get("exclude_colors") or [],
             )
             ranked = [
-                (self._evaluate_metric_expression(expression, scene, door), door)
-                for door in doors
+                (self._evaluate_metric_expression(expression, scene, obj), obj)
+                for obj in objects
             ]
             return sorted(
                 ranked,
@@ -1566,21 +1670,35 @@ class OperatorStationSession:
     def metric_query_summary(self, command: ApprovedCommand) -> str:
         raw_metric = str(command.payload.get("metric") or "")
         metric = self._resolve_metric_name(raw_metric)
+        object_type = (
+            self.planning_semantics.object_type_from_text(command.utterance)
+            or self.planning_semantics.default_object_type
+        )
         if metric is None:
-            proposed = self.capability_registry.ranked_handle_for(_normalize_metric_name(raw_metric))
+            proposed = self.planning_semantics.capability_handle(
+                "ranked",
+                metric=_normalize_metric_name(raw_metric),
+                object_type=object_type,
+            )
             self.last_request_plan = RequestPlan(
                 request_id=f"metric_query:{abs(hash((command.utterance, raw_metric))) % 1_000_000}",
                 original_utterance=command.utterance,
                 objective_type="query",
-                objective_summary=f"Rank doors by undefined metric {raw_metric}",
+                objective_summary=(
+                    f"Rank {self.planning_semantics.pluralize(str(object_type))} "
+                    f"by undefined metric {raw_metric}"
+                ),
                 steps=[
                     RequestPlanStep(
-                        step_id="rank_scene_doors",
+                        step_id=(
+                            "rank_scene_"
+                            f"{self.planning_semantics.pluralize(str(object_type))}"
+                        ),
                         layer="grounding",
                         operation="rank",
                         required_handle=proposed,
-                        inputs={"object_type": "door"},
-                        outputs=["active_claims.ranked_scene_doors"],
+                        inputs={"object_type": object_type},
+                        outputs=[self.planning_semantics.ranked_claims_output],
                         constraints={"metric": raw_metric, "reference": "agent"},
                     )
                 ],
@@ -1599,12 +1717,15 @@ class OperatorStationSession:
                 "I do not have that metric defined yet. Define it first, then approve it."
             )
 
-        handle = self.capability_registry.ranked_handle_for(metric)
+        handle = self.planning_semantics.ranked_handle(
+            metric,
+            object_type=object_type,
+        )
         intent = OperatorIntent(
             intent_type="status_query",
             status_query="ground_target",
             grounding_query_plan={
-                "object_type": "door",
+                "object_type": object_type,
                 "operation": "rank",
                 "primitive_handle": handle,
                 "metric": metric,
@@ -1618,12 +1739,16 @@ class OperatorStationSession:
                 "tie_policy": "display",
                 "answer_fields": ["ranked_doors", "distance"],
                 "required_capabilities": [handle],
-                "preserved_constraints": ["rank", "door", metric],
+                "preserved_constraints": ["rank", str(object_type), metric],
             },
             capability_status="executable",
             required_capabilities=[handle],
             confidence=1.0,
-            reason=f"Operator requested ranked doors by custom metric {metric}.",
+            reason=(
+                "Operator requested ranked "
+                f"{self.planning_semantics.pluralize(str(object_type))} "
+                f"by custom metric {metric}."
+            ),
         )
         result = self.turn_orchestrator.dispatch(self, intent, command.utterance)
         return self.execute_command(result)
@@ -1700,11 +1825,87 @@ class OperatorStationSession:
         if isinstance(handle, str) and handle.startswith("claims."):
             return self._dispatch_claims_filter(utterance, intent, cap_match)
 
+        evidence_command = self._maybe_start_needs_evidence_clarification(
+            utterance,
+            intent,
+        )
+        if evidence_command is not None:
+            return evidence_command
+
         return self._compose_grounding_query_plan(
             utterance,
             intent,
             plan,
             cap_match,
+        )
+
+    def _maybe_start_needs_evidence_clarification(
+        self,
+        utterance: str,
+        intent: OperatorIntent,
+    ) -> ApprovedCommand | None:
+        graph = self.last_readiness_graph
+        request_plan = self.last_request_plan
+        if graph is None or request_plan is None:
+            return None
+        if graph.graph_status != "needs_evidence":
+            return None
+        blocking = next(
+            (node for node in graph.nodes if node.step_id == graph.blocking_step_id),
+            None,
+        )
+        step = next(
+            (item for item in request_plan.steps if item.step_id == graph.blocking_step_id),
+            None,
+        )
+        target = dict(getattr(step, "inputs", {}) or {})
+        request = ClarificationRequest(
+            request_type="needs_evidence",
+            prompt=(
+                "I need more visible evidence before I can answer or execute that request."
+            ),
+            reason=blocking.reason if blocking is not None else graph.explanation,
+            resume_kind=(
+                "status_query"
+                if intent.intent_type in {"status_query", "claim_reference", "cache_query"}
+                else intent.intent_type
+            ),
+            evidence_scope="visible_only",
+            target=target,
+            options=["search_allowed", "visible_only"],
+            provenance={
+                "request_id": request_plan.request_id,
+                "blocking_step_id": graph.blocking_step_id,
+                "original_utterance": utterance,
+            },
+        )
+        self.last_clarification_request = request
+        self.pending_clarification = PendingClarification(
+            clarification_type="needs_evidence",
+            original_utterance=utterance,
+            resume_kind=request.resume_kind,
+            partial_selector=target,
+            missing_field="evidence_scope",
+            supported_values=list(request.options),
+            clarification_request=request,
+            **self._pending_clarification_trace(
+                utterance,
+                "needs_evidence",
+            ),
+        )
+        message = (
+            "NEEDS EVIDENCE\n"
+            f"{request.prompt}\n"
+            f"reason={request.reason}\n"
+            "Options: search_allowed, visible_only"
+        )
+        return _approved(
+            "clarification",
+            utterance,
+            payload={
+                "message": message,
+                "clarification_request": request.as_dict(),
+            },
         )
 
     def _grounding_query_plan_needs_distance_metric(self, plan: dict[str, Any]) -> bool:
@@ -1923,8 +2124,9 @@ class OperatorStationSession:
         wants_task = intent.intent_type == "task_instruction" or self._utterance_requests_navigation(
             _normalize_utterance(utterance)
         )
-        claims = self._ensure_ranked_door_claims(
+        claims = self._ensure_ranked_object_claims(
             plan.get("primitive_handle"),
+            object_type=plan.get("object_type"),
             request_plan=self.last_request_plan,
             readiness_graph=self.last_readiness_graph,
         )
@@ -1944,8 +2146,8 @@ class OperatorStationSession:
                 kind="clarification",
                 utterance=utterance,
                 payload={
-                    "message": self.domain_helper.format_ranked_doors_from_entries(
-                        claims.ranked_scene_doors,
+                    "message": self.domain_helper.format_ranked_objects_from_entries(
+                        claims.ranked_objects,
                         metric=str(
                             claims.last_grounding_query.get("distance_metric")
                             or self.domain_helper.metric_from_grounding_handle(
@@ -2037,11 +2239,20 @@ class OperatorStationSession:
             )
 
         if color is not None:
-            matches = [entry for entry in claims.ranked_scene_doors if entry.color == color]
+            matches = [entry for entry in claims.ranked_objects if entry.color == color]
             if wants_task:
                 if len(matches) == 1:
                     return self._task_command_for_entry(matches[0], utterance)
-                return _approved("ambiguous", utterance, f"No unique {color} door is visible. I did not execute.")
+                object_type = (
+                    plan.get("object_type")
+                    or self.planning_semantics.default_object_type
+                    or "object"
+                )
+                return _approved(
+                    "ambiguous",
+                    utterance,
+                    f"No unique {color} {object_type} is visible. I did not execute.",
+                )
 
             if matches:
                 self._set_last_grounded_claim(matches[0], claims)
@@ -2053,6 +2264,28 @@ class OperatorStationSession:
                         color=color,
                         matches=matches,
                         answer_fields=answer_fields,
+                    )
+                },
+                capability_match=cap_match,
+            )
+
+        if answer_fields.intersection({"distance", "ranked_objects", "ranked_doors"}):
+            # "answer the distance(s) to all <candidates>" — a ranked-distance list. Placed after
+            # the ordinal/extreme/color branches so it only catches the plain all-candidates case
+            # (e.g. "what is the distance to the doors"), not "third closest distance".
+            return ApprovedCommand(
+                kind="clarification",
+                utterance=utterance,
+                payload={
+                    "message": self.domain_helper.format_ranked_objects_from_entries(
+                        claims.ranked_objects,
+                        metric=str(
+                            claims.last_grounding_query.get("distance_metric")
+                            or self.domain_helper.metric_from_grounding_handle(
+                                str(claims.last_grounding_query.get("primitive", ""))
+                            )
+                        ),
+                        include_navigation_hint=not wants_task,
                     )
                 },
                 capability_match=cap_match,
@@ -2200,7 +2433,11 @@ class OperatorStationSession:
                 decision.suggested_handle, utterance, intent, cap_match, decision
             )
 
-        # Default: refuse
+        # Default: refuse. The arbitrator (LLM or smoke) only *decides* to refuse — the
+        # operator-facing statement is owned by the deterministic cap_match formatter, not
+        # the arbitrator's free text. This keeps the refusal wording identical across the
+        # regex/smoke and LLM paths (the LLM is plumbing for decisions, not prose); the
+        # LLM's own reasoning is preserved in last_arbitration_trace and the log.
         if cap_match.verdict == "synthesizable":
             kind = "synthesizable"
         elif cap_match.verdict == "ok":
@@ -2211,7 +2448,7 @@ class OperatorStationSession:
             kind=kind,
             utterance=utterance,
             payload={
-                "message": decision.operator_message or cap_match.operator_message(),
+                "message": cap_match.operator_message(),
                 "match": cap_match.compact(),
             },
             capability_match=cap_match,
@@ -2355,10 +2592,19 @@ class OperatorStationSession:
 
 
         selector = dict(intent.target_selector or {})
-        doors_in_scene = [o for o in scene.objects if o.object_type == "door"]
+        object_type = (
+            selector.get("object_type")
+            or self.planning_semantics.default_object_type
+            or "object"
+        )
+        matching_objects = [
+            obj for obj in scene.objects if obj.object_type == object_type
+        ]
         self.log(
             f"synthesis grounding: scene has {len(scene.objects)} objects "
-            f"({len(doors_in_scene)} doors), selector={selector}"
+            f"({len(matching_objects)} "
+            f"{self.planning_semantics.pluralize(str(object_type))}), "
+            f"selector={selector}"
         )
         try:
             ranked = fn(scene, selector)
@@ -2377,7 +2623,12 @@ class OperatorStationSession:
             )
 
         if not ranked:
-            return _approved("ambiguous", utterance, "No matching doors found. I did not execute.")
+            return _approved(
+                "ambiguous",
+                utterance,
+                f"No matching {self.planning_semantics.pluralize(str(object_type))} "
+                "found. I did not execute.",
+            )
 
 
         self._write_ranked_claims(ranked, {**selector, "primitive": handle})
@@ -2394,14 +2645,20 @@ class OperatorStationSession:
 
         # For status queries, show the full ranking across all found objects.
         short_handle = handle.split(".")[-2] if "." in handle else handle
-        header = f"DOORS RANKED BY {short_handle.upper()} DISTANCE FROM AGENT (synthesized: {handle})"
+        plural = self.planning_semantics.pluralize(str(object_type))
+        header = (
+            f"{plural.upper()} RANKED BY {short_handle.upper()} DISTANCE "
+            f"FROM AGENT (synthesized: {handle})"
+        )
         lines = [header]
         for i, (dist, obj) in enumerate(ranked):
             lines.append(
                 f"  {i + 1}. {obj.color} {obj.object_type}"
                 f" @({obj.x},{obj.y}) dist={dist:.2f}"
             )
-        lines.append("\n(I can navigate to any specific door — tell me which color.)")
+        lines.append(
+            f"\n(I can navigate to any specific {object_type} - tell me which color.)"
+        )
         return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
 
 
@@ -2449,7 +2706,11 @@ class OperatorStationSession:
         result = self.synthesizer.synthesize(
             handle=handle,
             description=description,
-            consumes=tuple(spec.inputs) if spec is not None else ("active_claims.ranked_scene_doors", "condition"),
+            consumes=(
+                tuple(spec.inputs)
+                if spec is not None
+                else (self.planning_semantics.ranked_claims_output, "condition")
+            ),
             produces=tuple(spec.outputs) if spec is not None else ("filtered_entries",),
         )
         if result.status != "success":
@@ -2463,7 +2724,11 @@ class OperatorStationSession:
             repair = self.synthesizer.synthesize(
                 handle=handle,
                 description=description,
-                consumes=tuple(spec.inputs) if spec is not None else ("active_claims.ranked_scene_doors", "condition"),
+                consumes=(
+                    tuple(spec.inputs)
+                    if spec is not None
+                    else (self.planning_semantics.ranked_claims_output, "condition")
+                ),
                 produces=tuple(spec.outputs) if spec is not None else ("filtered_entries",),
                 previous_code=result.code,
                 validation_error="; ".join(vr.failures),
@@ -2507,11 +2772,12 @@ class OperatorStationSession:
         expected_ranked_handle = self.planning_semantics.capability_handle("ranked", metric=metric)
         if (
             self.active_claims is None
-            or not self.active_claims.ranked_scene_doors
+            or not self.active_claims.ranked_objects
             or self.active_claims.last_grounding_query.get("primitive") != expected_ranked_handle
         ):
-            claims = self._ensure_ranked_door_claims(
+            claims = self._ensure_ranked_object_claims(
                 expected_ranked_handle,
+                object_type=plan.get("object_type"),
                 request_plan=self.last_request_plan,
                 readiness_graph=self.last_readiness_graph,
             )
@@ -2529,7 +2795,7 @@ class OperatorStationSession:
                     capability_match=cap_match,
                 )
 
-        if self.active_claims is None or not self.active_claims.ranked_scene_doors:
+        if self.active_claims is None or not self.active_claims.ranked_objects:
             return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
@@ -2546,7 +2812,7 @@ class OperatorStationSession:
             "comparison": plan.get("comparison") or "above",
             "metric": metric,
         }
-        entries = self.active_claims.ranked_scene_doors
+        entries = self.active_claims.ranked_objects
         self.log(
             f"claims-filter: calling {handle} with {len(entries)} entries, condition={condition}"
         )
@@ -2826,11 +3092,23 @@ class OperatorStationSession:
         wants_task = self._utterance_requests_navigation(
             _normalize_utterance(proposal.original_utterance)
         )
+        object_type = (
+            existing_plan.get("object_type")
+            or self.planning_semantics.object_type_from_text(
+                proposal.original_utterance
+            )
+            or self.planning_semantics.default_object_type
+        )
         required = [proposal.handle]
         if wants_task:
-            required.append("task.go_to_object.door")
+            task_handle = self.planning_semantics.task_handle(
+                "go_to_object",
+                object_type,
+            )
+            if task_handle is not None:
+                required.append(task_handle)
         plan = {
-            "object_type": "door",
+            "object_type": object_type,
             "operation": "filter",
             "primitive_handle": proposal.handle,
             "metric": metric,
@@ -2847,7 +3125,7 @@ class OperatorStationSession:
             "answer_fields": existing_plan.get("answer_fields") or ["target", "distance"],
             "required_capabilities": required,
             "preserved_constraints": [
-                "door",
+                str(object_type),
                 str(metric),
                 str(comparison),
                 str(threshold_float),
@@ -2936,17 +3214,22 @@ class OperatorStationSession:
         scene = self.memory.scene_model
         if scene is None:
             return None
-        doors = scene.find(object_type="door")
+        visible_objects = [
+            obj
+            for obj in scene.objects
+            if obj.object_type in self.planning_semantics.object_types
+        ]
         summary = {
             "agent_position": {"x": scene.agent_x, "y": scene.agent_y},
-            "visible_doors": [
+            "visible_objects": [
                 {
-                    "color": d.color,
-                    "x": d.x,
-                    "y": d.y,
-                    "manhattan_distance": scene.manhattan_distance_from_agent(d),
+                    "object_type": obj.object_type,
+                    "color": obj.color,
+                    "x": obj.x,
+                    "y": obj.y,
+                    "manhattan_distance": scene.manhattan_distance_from_agent(obj),
                 }
-                for d in doors
+                for obj in visible_objects
             ],
         }
         if self.active_claims is not None and self._claims_valid_for_current_environment(scene):
@@ -3120,16 +3403,27 @@ class OperatorStationSession:
                 ranked_handle = euc
             else:
                 return None
-        claims = self._ensure_ranked_door_claims(
+        claims = self._ensure_ranked_object_claims(
             ranked_handle,
+            object_type=self.planning_semantics.object_type_from_text(normalized),
             request_plan=self.last_request_plan,
             readiness_graph=self.last_readiness_graph,
         )
         if isinstance(claims, str):
             return _approved("missing_skills", utterance, payload={"message": claims, "match": cap_match.compact()}, capability_match=cap_match)
 
-        if not claims.ranked_scene_doors:
-            return _approved("ambiguous", utterance, "No visible doors are available to compose from.")
+        if not claims.ranked_objects:
+            object_type = (
+                self.planning_semantics.object_type_from_text(normalized)
+                or self.planning_semantics.default_object_type
+                or "object"
+            )
+            return _approved(
+                "ambiguous",
+                utterance,
+                f"No visible {self.planning_semantics.pluralize(object_type)} "
+                "are available to compose from.",
+            )
 
 
         wants_task = self._utterance_requests_navigation(normalized) or (
@@ -3160,8 +3454,8 @@ class OperatorStationSession:
                 kind="clarification",
                 utterance=utterance,
                 payload={
-                    "message": self.domain_helper.format_ranked_doors_from_entries(
-                        claims.ranked_scene_doors,
+                    "message": self.domain_helper.format_ranked_objects_from_entries(
+                        claims.ranked_objects,
                         metric=str(
                             claims.last_grounding_query.get("distance_metric")
                             or self.domain_helper.metric_from_grounding_handle(
@@ -3204,21 +3498,27 @@ class OperatorStationSession:
     ) -> str | None:
         for signal in verif_result.signals:
             handle = signal.required_handle
-            if "all_doors.ranked" not in handle:
+            if ".ranked." not in handle:
                 continue
             spec = self.capability_registry.lookup(handle)
             if spec is not None and spec.implementation_status == "implemented":
                 return handle
         return None
 
-    def _ensure_ranked_door_claims(
+    def _ensure_ranked_object_claims(
         self,
         handle: str | None = None,
         *,
+        object_type: str | None = None,
         request_plan: RequestPlan | None = None,
         readiness_graph: ReadinessGraph | None = None,
     ) -> StationActiveClaims | str:
-        handle = handle or self.planning_semantics.capability_handle("ranked", metric="manhattan")
+        object_type = object_type or self.planning_semantics.default_object_type
+        handle = handle or self.planning_semantics.capability_handle(
+            "ranked",
+            metric=self.planning_semantics.default_metric,
+            object_type=object_type,
+        )
         spec = self.capability_registry.lookup(handle)
         if spec is None:
             return f"Capability '{handle}' is not registered. I cannot compose that result."
@@ -3234,6 +3534,7 @@ class OperatorStationSession:
             self.active_claims is not None
             and self._claims_valid_for_current_environment(scene)
             and self.active_claims.last_grounding_query.get("primitive") == handle
+            and self.active_claims.last_grounding_query.get("object_type") == object_type
         ):
             return self.active_claims
         # Cache miss — invoking the sense primitive requires typed authority.
@@ -3251,27 +3552,35 @@ class OperatorStationSession:
         except SchemaValidationError as exc:
             return f"Sense authority denied for '{handle}': {exc}"
         self.last_sense_ticket = ticket
-        doors = scene.find(object_type="door")
-        if not doors:
-            return "No doors visible in the current scene."
+        objects = scene.find(object_type=object_type)
+        if not objects:
+            plural = self.planning_semantics.pluralize(object_type or "object")
+            return f"No {plural} visible in the current scene."
         fn = self.capability_registry.get_synthesized_callable(handle)
         if fn is not None:
             try:
                 ranked = fn(
                     scene,
-                    {"object_type": "door", "color": None, "exclude_colors": []},
+                    {
+                        "object_type": object_type,
+                        "color": None,
+                        "exclude_colors": [],
+                    },
                 )
             except Exception as exc:  # noqa: BLE001
                 return f"Synthesized primitive '{handle}' raised an error: {exc}"
         else:
             ranked = sorted(
-                [(scene.manhattan_distance_from_agent(d), d) for d in doors],
+                [
+                    (scene.manhattan_distance_from_agent(obj), obj)
+                    for obj in objects
+                ],
                 key=lambda pair: (pair[0], pair[1].color or "", pair[1].x, pair[1].y),
             )
         self._write_ranked_claims(
             ranked,
             {
-                "object_type": "door",
+                "object_type": object_type,
                 "relation": "all",
                 "distance_metric": self.domain_helper.metric_from_grounding_handle(handle),
                 "distance_reference": "agent",
@@ -3312,10 +3621,13 @@ class OperatorStationSession:
             or not self._claims_valid_for_current_environment(scene)
         ):
             return None
-        matches = [entry for entry in self.active_claims.ranked_scene_doors if entry.color == color]
+        matches = [entry for entry in self.active_claims.ranked_objects if entry.color == color]
         if len(matches) != 1:
             return None
-        return _approved("task_instruction", f"go to the {matches[0].color} door")
+        return _approved(
+            "task_instruction",
+            self.domain_helper.task_utterance_for_entry(matches[0]),
+        )
 
 
     def _command_from_grounding_followup(self, utterance: str) -> ApprovedCommand | None:
@@ -3415,6 +3727,14 @@ class OperatorStationSession:
     def _task_command_for_entry(self, entry: GroundedObjectEntry, utterance: str) -> ApprovedCommand:
         return _approved("task_instruction", self.domain_helper.task_utterance_for_entry(entry))
 
+    def _claims_object_type(self, claims: StationActiveClaims) -> str:
+        return str(
+            claims.last_grounding_query.get("object_type")
+            or claims.last_grounded_target.object_type
+            or self.planning_semantics.default_object_type
+            or "object"
+        )
+
 
     def _candidate_clarification_for_entries(
         self,
@@ -3450,21 +3770,26 @@ class OperatorStationSession:
         *,
         wants_task: bool,
     ) -> ApprovedCommand:
-        matches = [entry for entry in claims.ranked_scene_doors if entry.distance == distance]
+        matches = [entry for entry in claims.ranked_objects if entry.distance == distance]
         if not matches:
+            object_type = self._claims_object_type(claims)
             return ApprovedCommand(
                 kind="ambiguous",
                 utterance=utterance,
                 payload={
                     "message": (
-                        f"No visible door has Manhattan distance {distance} from the agent."
+                        f"No visible {object_type} has Manhattan distance "
+                        f"{distance} from the agent."
                     )
                 },
             )
         if len(matches) > 1:
+            plural = self.planning_semantics.pluralize(
+                self._claims_object_type(claims)
+            )
             message = (
                 "CLARIFY\n"
-                f"Multiple doors have distance {distance}. Which one should I use?\n"
+                f"Multiple {plural} have distance {distance}. Which one should I use?\n"
                 f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in matches])}"
             )
             if wants_task:
@@ -3517,11 +3842,18 @@ class OperatorStationSession:
             "5th": 4,
         }
         rank = ordinal_to_index[ordinal]
-        ranked = list(claims.ranked_scene_doors)
+        ranked = list(claims.ranked_objects)
         if direction in {"farthest", "furthest"}:
             ranked = list(reversed(ranked))
         if rank >= len(ranked):
-            return _approved("ambiguous", utterance, "There are not enough visible doors for that ordinal request.")
+            plural = self.planning_semantics.pluralize(
+                self._claims_object_type(claims)
+            )
+            return _approved(
+                "ambiguous",
+                utterance,
+                f"There are not enough visible {plural} for that ordinal request.",
+            )
 
         entry = ranked[rank]
         tied = [item for item in ranked if item.distance == entry.distance]
@@ -3564,12 +3896,19 @@ class OperatorStationSession:
         wants_task: bool,
         tie_policy: str = "clarify",
     ) -> ApprovedCommand:
-        ranked = list(claims.ranked_scene_doors)
+        ranked = list(claims.ranked_objects)
         if order == "descending":
             ranked = list(reversed(ranked))
         rank = ordinal - 1
         if rank >= len(ranked):
-            return _approved("ambiguous", utterance, "There are not enough visible doors for that ordinal request.")
+            plural = self.planning_semantics.pluralize(
+                self._claims_object_type(claims)
+            )
+            return _approved(
+                "ambiguous",
+                utterance,
+                f"There are not enough visible {plural} for that ordinal request.",
+            )
 
         entry = ranked[rank]
         tied = [item for item in ranked if item.distance == entry.distance]
@@ -3622,13 +3961,16 @@ class OperatorStationSession:
         extreme: str,
         cap_match: CapabilityMatchResult,
     ) -> ApprovedCommand:
-        entries = claims.ranked_scene_doors
+        entries = claims.ranked_objects
         distance = entries[0].distance if extreme == "closest" else entries[-1].distance
         tied = [entry for entry in entries if entry.distance == distance]
         if len(tied) > 1:
+            plural = self.planning_semantics.pluralize(
+                self._claims_object_type(claims)
+            )
             message = (
                 "CLARIFY\n"
-                f"That matched multiple {extreme} doors. Which one should I use?\n"
+                f"That matched multiple {extreme} {plural}. Which one should I use?\n"
                 f"Options: {_format_targets([self.domain_helper.entry_target_dict(e) for e in tied])}"
             )
             return self._candidate_clarification_for_entries(
@@ -3644,14 +3986,14 @@ class OperatorStationSession:
         entry: GroundedObjectEntry,
         claims: StationActiveClaims,
     ) -> None:
-        for i, candidate in enumerate(claims.ranked_scene_doors):
+        for i, candidate in enumerate(claims.ranked_objects):
             if candidate.x == entry.x and candidate.y == entry.y:
                 claims.last_grounded_target = candidate
                 claims.last_grounded_rank = i
                 return
 
     def _format_extreme_answer(self, claims: StationActiveClaims, normalized: str) -> str:
-        entries = claims.ranked_scene_doors
+        entries = claims.ranked_objects
         min_distance = entries[0].distance
         max_distance = entries[-1].distance
         closest = [entry for entry in entries if entry.distance == min_distance]
@@ -3688,7 +4030,7 @@ class OperatorStationSession:
         include_closest: bool,
         include_farthest: bool,
     ) -> str:
-        entries = claims.ranked_scene_doors
+        entries = claims.ranked_objects
         min_distance = entries[0].distance
         max_distance = entries[-1].distance
         closest = [entry for entry in entries if entry.distance == min_distance]
@@ -3720,7 +4062,7 @@ class OperatorStationSession:
         claims: StationActiveClaims,
         answer_fields: set[str],
     ) -> str:
-        entries = list(claims.ranked_scene_doors)
+        entries = list(claims.ranked_objects)
         descending = list(reversed(entries))
         ordinal_index = {
             "first": 0,
@@ -3840,8 +4182,7 @@ class OperatorStationSession:
     def ground_target_selector(self, selector: dict[str, Any] | None) -> dict[str, Any]:
         if isinstance(selector, dict):
             if (
-                selector.get("object_type") == "door"
-                and selector.get("relation") == "closest"
+                selector.get("relation") == "closest"
                 and selector.get("distance_metric") is None
             ):
                 return {
@@ -3853,7 +4194,10 @@ class OperatorStationSession:
                     "message": self.clarification_prompt("distance_metric", ["manhattan"]),
                 }
         try:
-            selector = TargetSelector.from_dict(selector).__dict__
+            selector = TargetSelector.from_dict(
+                selector,
+                object_types=list(self.planning_semantics.object_types),
+            ).__dict__
         except SchemaValidationError as exc:
             return {
                 "ok": False,
@@ -3866,18 +4210,26 @@ class OperatorStationSession:
                 "status": "invalid_unsupported",
                 "message": "No target selector was provided. I did not execute.",
             }
-        if selector.get("object_type") != "door":
+        object_type = selector.get("object_type")
+        if object_type not in self.planning_semantics.object_types:
             return {
                 "ok": False,
                 "status": "invalid_unsupported",
-                "message": "Only door selectors are supported right now.",
+                "message": (
+                    f"Object type {object_type!r} is not supported in the active "
+                    "operational context."
+                ),
             }
         if selector.get("relation") == "closest":
             metric = selector.get("distance_metric")
             if metric != "manhattan":
                 # Check whether a synthesized callable exists for this metric
                 if metric is not None:
-                    synth_handle = self.planning_semantics.capability_handle("closest", metric=metric)
+                    synth_handle = self.planning_semantics.capability_handle(
+                        "closest",
+                        metric=metric,
+                        object_type=object_type,
+                    )
                     fn = self.capability_registry.get_synthesized_callable(synth_handle)
                     if fn is not None:
                         return self._ground_with_synthesized_callable(fn, selector)
@@ -3909,7 +4261,7 @@ class OperatorStationSession:
             }
 
         candidates = scene.find(
-            object_type="door",
+            object_type=object_type,
             color=selector.get("color"),
             exclude_colors=selector.get("exclude_colors") or [],
         )
@@ -3918,7 +4270,7 @@ class OperatorStationSession:
             return {
                 "ok": False,
                 "status": "no_match",
-                "message": "No matching door found. I did not execute.",
+                "message": f"No matching {object_type} found. I did not execute.",
             }
 
         relation = selector.get("relation")
@@ -3935,7 +4287,8 @@ class OperatorStationSession:
                     "status": "ambiguous",
                     "candidates": tied,
                     "message": (
-                        "That selector matched multiple closest doors: "
+                        f"That selector matched multiple closest "
+                        f"{self.planning_semantics.pluralize(str(object_type))}: "
                         f"{_format_targets(tied)}. I did not execute."
                     ),
                 }
@@ -3950,7 +4303,8 @@ class OperatorStationSession:
                     "status": "ambiguous",
                     "candidates": dicts,
                     "message": (
-                        "That selector matched multiple doors: "
+                        f"That selector matched multiple "
+                        f"{self.planning_semantics.pluralize(str(object_type))}: "
                         f"{_format_targets(dicts)}. I did not execute."
                     ),
                 }
@@ -3986,10 +4340,15 @@ class OperatorStationSession:
                 "message": f"Synthesized primitive raised an error: {exc}",
             }
         if not ranked:
+            object_type = (
+                selector.get("object_type")
+                or self.planning_semantics.default_object_type
+                or "object"
+            )
             return {
                 "ok": False,
                 "status": "no_match",
-                "message": "No matching door found. I did not execute.",
+                "message": f"No matching {object_type} found. I did not execute.",
             }
         self._write_ranked_claims(ranked, selector)
         distance, target_obj = ranked[0]
@@ -4002,7 +4361,6 @@ class OperatorStationSession:
     ) -> ApprovedCommand | None:
         if (
             isinstance(selector, dict)
-            and selector.get("object_type") == "door"
             and selector.get("relation") == "closest"
             and selector.get("distance_metric") is None
         ):
@@ -4186,7 +4544,16 @@ class OperatorStationSession:
             task_type="go_to_object",
             target_selector=selector,
             capability_status="executable",
-            required_capabilities=["task.go_to_object.door"],
+            required_capabilities=[
+                handle
+                for handle in [
+                    self.planning_semantics.task_handle(
+                        "go_to_object",
+                        selector.get("object_type"),
+                    )
+                ]
+                if handle is not None
+            ],
             confidence=1.0,
             reason="Clarification answer resumed a task instruction.",
         )
@@ -4285,7 +4652,10 @@ class OperatorStationSession:
             )
         target = matches[0]
         selector = {
-            "object_type": target.get("type") or "door",
+            "object_type": (
+                target.get("type")
+                or self.planning_semantics.default_object_type
+            ),
             "color": target.get("color"),
         }
         intent = self._intent_for_clarification_resume(pending, selector)
@@ -4380,6 +4750,23 @@ class OperatorStationSession:
             )
         return self._execute_grounding_display(handle)
 
+    def _object_type_for_capability_handle(
+        self,
+        handle: str,
+        capability_key: str,
+    ) -> str | None:
+        for object_type in self.planning_semantics.object_types:
+            for metric in self.planning_semantics.metrics:
+                candidate = self.planning_semantics.capability_handle(
+                    capability_key,
+                    metric=metric,
+                    reference="agent",
+                    object_type=object_type,
+                )
+                if candidate == handle:
+                    return object_type
+        return self.planning_semantics.default_object_type
+
     def _execute_grounding_display(self, handle: str) -> str:
         """Run the named grounding primitive against the current SceneModel and return text.
 
@@ -4388,36 +4775,50 @@ class OperatorStationSession:
         scene = self._ensure_scene_model()
         if scene is None:
             return "No scene data available yet."
-        if "all_doors.ranked" in handle:
-            doors = scene.find(object_type="door")
-            if not doors:
-                return "No doors visible in the current scene."
+        if ".ranked." in handle:
+            object_type = self._object_type_for_capability_handle(
+                handle,
+                "ranked",
+            )
+            objects = scene.find(object_type=object_type)
+            if not objects:
+                plural = self.planning_semantics.pluralize(
+                    object_type or "object"
+                )
+                return f"No {plural} visible in the current scene."
             fn = self.capability_registry.get_synthesized_callable(handle)
             if fn is not None:
                 try:
                     ranked = fn(
                         scene,
-                        {"object_type": "door", "color": None, "exclude_colors": []},
+                        {
+                            "object_type": object_type,
+                            "color": None,
+                            "exclude_colors": [],
+                        },
                     )
                 except Exception as exc:  # noqa: BLE001
                     return f"Synthesized primitive '{handle}' raised an error: {exc}"
             else:
                 ranked = sorted(
-                    [(scene.manhattan_distance_from_agent(d), d) for d in doors],
+                    [
+                        (scene.manhattan_distance_from_agent(obj), obj)
+                        for obj in objects
+                    ],
                     key=lambda pair: (pair[0], pair[1].color or ""),
                 )
             metric = self.domain_helper.metric_from_grounding_handle(handle)
             self._write_ranked_claims(
                 ranked,
                 {
-                    "object_type": "door",
+                    "object_type": object_type,
                     "relation": "all",
                     "distance_metric": metric,
                     "distance_reference": "agent",
                     "primitive": handle,
                 },
             )
-            return self.domain_helper.format_ranked_doors_from_entries(
+            return self.domain_helper.format_ranked_objects_from_entries(
                 [
                     {
                         "color": d.color,
@@ -4460,15 +4861,19 @@ class OperatorStationSession:
                 capability_match=cap_match,
             )
 
-        # Selector-grounding substitute (e.g., euclidean → manhattan for closest door).
+        # Selector-grounding substitute (e.g., euclidean to manhattan for closest object).
         # Re-ground using the substitute metric then continue with the original intent path.
-        if handle.startswith("grounding.closest_door."):
-            parts = handle.split(".")  # grounding, closest_door, <metric>, <reference>
+        if ".closest_" in handle:
+            parts = handle.split(".")
             metric = parts[2] if len(parts) > 2 else "manhattan"
             reference = parts[3] if len(parts) > 3 else "agent"
+            object_type = (
+                (intent.target_selector or {}).get("object_type")
+                or self._object_type_for_capability_handle(handle, "closest")
+            )
             base_selector: dict[str, Any] = dict(intent.target_selector or {})
             base_selector.update({
-                "object_type": "door",
+                "object_type": object_type,
                 "relation": "closest",
                 "distance_metric": metric,
                 "distance_reference": reference,
@@ -4492,8 +4897,8 @@ class OperatorStationSession:
             return _approved("clarification", utterance, "\n".join(lines), capability_match=cap_match)
 
 
-        # Display-grounding substitute (e.g., all_doors.ranked for a ranked query).
-        if "all_doors.ranked" in handle:
+        # Display-grounding substitute for a ranked query.
+        if ".ranked." in handle:
             result_text = self._execute_grounding_display(handle)
             return _approved("clarification", utterance, result_text, capability_match=cap_match)
 
@@ -4529,6 +4934,26 @@ class OperatorStationSession:
         if scene is not None:
             self.current_environment_identity = self._build_environment_identity(scene)
         return scene
+
+    def _current_evidence_state(self) -> dict[str, Any] | None:
+        scene = self._ensure_scene_model()
+        if scene is None:
+            return None
+        return {
+            "observation_model": scene.observation_model,
+            "visible_objects": [
+                {
+                    "object_type": obj.object_type,
+                    "type": obj.object_type,
+                    "color": obj.color,
+                    "x": obj.x,
+                    "y": obj.y,
+                }
+                for obj in scene.objects
+            ],
+            "visible_cell_count": len(scene.visible_cells),
+            "unseen_cell_count": len(scene.unseen_cells),
+        }
 
     def _task_family_for_env(self) -> str | None:
         if "GoToDoor" in self.env_id:
@@ -4671,15 +5096,25 @@ class OperatorStationSession:
         if ref_type == "next_closest":
             entry, rank = self.active_claims.next_ranked()
             if entry is None:
-                return {"ok": False, "message": "No further doors in the ranked list."}
+                object_type = self._claims_object_type(self.active_claims)
+                return {
+                    "ok": False,
+                    "message": (
+                        "No further "
+                        f"{self.planning_semantics.pluralize(object_type)} "
+                        "in the ranked list."
+                    ),
+                }
             self.active_claims.last_grounded_target = entry
             self.active_claims.last_grounded_rank = rank
             return {"ok": True, "target": entry.as_dict(), "distance": entry.distance}
 
         if ref_type == "other_door":
-            others = self.active_claims.other_doors()
+            others = self.active_claims.other_objects()
+            object_type = self._claims_object_type(self.active_claims)
+            plural = self.planning_semantics.pluralize(object_type)
             if not others:
-                return {"ok": False, "message": "No other doors available."}
+                return {"ok": False, "message": f"No other {plural} available."}
             if len(others) > 1:
                 dicts = [e.as_dict() for e in others]
                 return {
@@ -4687,13 +5122,13 @@ class OperatorStationSession:
                     "status": "ambiguous",
                     "candidates": dicts,
                     "message": (
-                        "Multiple other doors: "
+                        f"Multiple other {plural}: "
                         f"{_format_targets(dicts)}. Which one did you mean?"
                     ),
                 }
             entry = others[0]
             rank = next(
-                i for i, d in enumerate(self.active_claims.ranked_scene_doors)
+                i for i, d in enumerate(self.active_claims.ranked_objects)
                 if d.x == entry.x and d.y == entry.y
             )
             self.active_claims.last_grounded_target = entry
@@ -4703,18 +5138,23 @@ class OperatorStationSession:
         return {"ok": False, "message": f"Unknown claim reference: {ref_type}"}
 
     def _missing_claim_reference_prerequisite(self, ref_type: str) -> str:
+        object_type = (
+            self.planning_semantics.default_object_type
+            or self.domain_helper.default_object_type
+        )
+        metric = self.planning_semantics.default_metric
         if ref_type == "next_closest":
             return self._grounding_prerequisite_message(
                 relation="ranked",
-                object_type="door",
-                metric="manhattan",
+                object_type=object_type,
+                metric=metric,
                 reference="agent",
             )
         if ref_type == "other_door":
             return self._grounding_prerequisite_message(
                 relation="selected",
-                object_type="door",
-                metric="manhattan",
+                object_type=object_type,
+                metric=metric,
                 reference="agent",
             )
         return "No active grounding claims. Ground the relevant target first."
@@ -4738,7 +5178,7 @@ class OperatorStationSession:
         return f"No active grounding claims for that reference. First ask: {query} ({needed})."
 
     def compose_known_task(self, instruction: str) -> TaskRequest:
-        parsed = _parse_go_to_object_utterance(instruction)
+        parsed = self.domain_helper.parse_go_to_object_utterance(instruction)
         if parsed is None:
             raise ValueError(f"Unsupported known task instruction: {instruction}")
         return TaskRequest(
@@ -4825,7 +5265,23 @@ class OperatorStationSession:
         self.log("compiling task/procedure and warming JIT templates before motion")
         task_override = None
         procedure_override = None
-        if _parse_go_to_object_utterance(instruction) is not None:
+        if ticket.mission_contract is not None:
+            contract = ticket.mission_contract
+            if contract.procedure is None:
+                raise RuntimeError("Mission ExecutionTicket requires a procedure")
+            task_override = TaskRequest(
+                instruction=instruction,
+                task_type=ticket.task_type,
+                params=dict(ticket.params),
+                source="mission_cortex",
+            )
+            procedure_override = contract.procedure
+            self.log(
+                "using approved mission contract: "
+                f"mission_id={contract.mission_id} "
+                f"procedure={procedure_override.steps}"
+            )
+        elif self.domain_helper.parse_go_to_object_utterance(instruction) is not None:
             task_override = self.compose_known_task(instruction)
             procedure_override = self.compose_known_procedure(task_override)
             self.log(
@@ -4920,7 +5376,7 @@ class OperatorStationSession:
                     return instruction
             return None
 
-        return _canonicalize_task_instruction(utterance)
+        return self.domain_helper.canonicalize_task_instruction(utterance)
 
     def _instruction_from_delivery_target(self) -> str | None:
         delivery_target = self.memory.knowledge.get("delivery_target")
@@ -5214,12 +5670,18 @@ class OperatorStationSession:
                 continue
 
             try:
-                self.compose_known_task(concept.utterance)
+                task = self.compose_known_task(concept.utterance)
             except ValueError:
                 self.log(
                     "procedure build failed: cannot resolve handle for "
                     f"'{concept.utterance}'"
                 )
+                return None
+            task_handle = self.planning_semantics.task_handle(
+                task.task_type,
+                task.params.get("object_type"),
+            )
+            if task_handle is None:
                 return None
             step_id = f"concept_{idx}_execute_task"
             plan_steps.append(
@@ -5227,7 +5689,7 @@ class OperatorStationSession:
                     step_id=step_id,
                     layer="task",
                     operation="execute",
-                    required_handle="task.go_to_object.door",
+                    required_handle=task_handle,
                     implementation_status="implemented",
                     constraints={"concept_name": concept.name, "utterance": concept.utterance},
                     depends_on=[prev_step_id] if prev_step_id is not None else [],
@@ -5311,13 +5773,19 @@ class OperatorStationSession:
             except ValueError:
                 self.log(f"sequence build failed: cannot resolve handle for '{step_utterance}'")
                 return None
+            task_handle = self.planning_semantics.task_handle(
+                task.task_type,
+                task.params.get("object_type"),
+            )
+            if task_handle is None:
+                return None
             step_id = f"step_{idx}"
             plan_steps.append(
                 RequestPlanStep(
                     step_id=step_id,
                     layer="task",
                     operation="execute",
-                    required_handle="task.go_to_object.door",
+                    required_handle=task_handle,
                     implementation_status="implemented",
                     constraints={"utterance": step_utterance},
                     depends_on=[prev_step_id] if prev_step_id is not None else [],
@@ -5407,8 +5875,20 @@ class OperatorStationSession:
         self.log(f"motor_execute: {action_name} × {count}")
         result = self.substrate.run_motor_actions(seed=self.seed, actions=actions)
         self.last_result = result
+        if result.get("success", False):
+            self._refresh_scene_model_after_motion()
         label = action_name.replace("_", " ")
         return f"MOTOR COMPLETE ({label} × {count}): {result.get('steps_taken', count)} steps executed."
+
+    def _refresh_scene_model_after_motion(self) -> None:
+        try:
+            self.substrate.sense_idle_scene(self.sense, seed=self.seed)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"post-motion sense refresh failed: {type(exc).__name__}: {exc}")
+            return
+        scene = self.memory.scene_model
+        if scene is not None:
+            self.current_environment_identity = self._build_environment_identity(scene)
 
     def _run_motor_sequence_command(
         self, sequence: list[dict[str, Any]], original_utterance: str
@@ -5503,6 +5983,8 @@ class OperatorStationSession:
 
     def reset(self, *, clear_memory: bool = False) -> str:
         self.log("resetting station state")
+        self.close_preview()
+        self.close_task_window()
         self.pending_clarification = None
         self.pending_synthesis_proposal = None
         self.active_claims = None
@@ -5519,6 +6001,8 @@ class OperatorStationSession:
         self.last_command_result = None
         self.memory.reset_episode()
         self.last_result = None
+        self.open_preview()
+        self._refresh_scene_model_after_motion()
         if clear_memory:
             self.representation.clear_operator_knowledge()
             return "RESET: episodic state and durable knowledge cleared"
@@ -5552,15 +6036,26 @@ class OperatorStationSession:
         scene = self._ensure_scene_model()
         if scene is None:
             return f"SCENE\nenv_id={self.env_id}\nseed={self.seed}\nstatus=no scene data"
-        doors = scene.find(object_type="door")
-        door_strs = [f"{d.color} door@({d.x},{d.y})" for d in doors]
+        object_type = (
+            self.planning_semantics.default_object_type
+            or self.domain_helper.default_object_type
+        )
+        objects = scene.find(object_type=object_type)
+        object_labels = [
+            f"{obj.color} {obj.object_type}@({obj.x},{obj.y})"
+            for obj in objects
+        ]
+        object_key = self.operational_context.display_rules.get(
+            "scene_object_key",
+            self.planning_semantics.pluralize(object_type),
+        )
         return (
             "SCENE\n"
             f"env_id={self.env_id}\n"
             f"seed={self.seed}\n"
             f"agent=({scene.agent_x},{scene.agent_y}) dir={scene.agent_dir}\n"
             f"source={scene.source}\n"
-            f"doors={', '.join(door_strs) if door_strs else 'none'}\n"
+            f"{object_key}={', '.join(object_labels) if object_labels else 'none'}\n"
             f"object_count={len(scene.objects)}"
         )
 
@@ -5620,6 +6115,8 @@ class OperatorStationSession:
             available_targets = progress.get("available_targets")
             if available_targets is not None:
                 lines.append(f"available_targets={_format_targets(available_targets)}")
+        elif result["final_state"].get("failure_reason"):
+            lines.append(f"reason={result['final_state']['failure_reason']}")
         return "\n".join(lines)
 
     def _last_task_complete(self) -> bool | None:
@@ -5670,17 +6167,20 @@ def _format_targets(targets: list[dict[str, Any]]) -> str:
 def run_repl(session: OperatorStationSession) -> int:
     print(session.startup())
     try:
-        while True:
-            try:
+        try:
+            while True:
                 utterance = input("READY> ")
-            except EOFError:
-                print()
-                return 0
-            response = session.handle_utterance(utterance)
-            if response == "QUIT":
-                print("BYE")
-                return 0
-            print(response)
+                response = session.handle_utterance(utterance)
+                if response == "QUIT":
+                    print("BYE")
+                    return 0
+                print(response)
+        except EOFError:
+            print()
+            return 0
+        except KeyboardInterrupt:
+            print("\nINTERRUPTED")
+            return 130
     finally:
         session.close()
 

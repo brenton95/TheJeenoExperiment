@@ -4,6 +4,7 @@ from .schemas import (
     ExecutionTicket,
     MemoryUpdate,
     MemoryWriteTicket,
+    MissionContract,
     RawMotorTicket,
     ReadinessGraph,
     RequestPlan,
@@ -29,6 +30,7 @@ class SideEffectAuthority:
         mission_id: str | None = None,
         parent_request_id: str | None = None,
         provenance: dict | None = None,
+        mission_contract: MissionContract | None = None,
     ) -> ExecutionTicket:
         return ExecutionTicket(
             request_id=request_plan.request_id,
@@ -41,6 +43,7 @@ class SideEffectAuthority:
             mission_id=mission_id,
             parent_request_id=parent_request_id,
             provenance=dict(provenance or {}),
+            mission_contract=mission_contract,
         )
 
     def issue_raw_motor_ticket(

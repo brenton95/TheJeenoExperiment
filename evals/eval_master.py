@@ -1,9 +1,14 @@
 import argparse
+import os
 import sys
 import subprocess
 from pathlib import Path
 
-from manifest import EVAL_SPECS, EXPECTED_FAIL_SUITE, select_eval_specs
+from manifest import EVAL_SPECS, EXPECTED_FAIL_SUITE, LIVE_LLM_SUITE, select_eval_specs
+
+# LIVE_LLM_SUITE (from manifest) is the ONLY suite permitted to make real LLM calls. Every
+# other suite is the deterministic gate and runs with the live-LLM key stripped (below), so
+# no probe can flake on a network call regardless of whether its author neutralized it.
 
 
 def main():
@@ -11,7 +16,7 @@ def main():
     parser.add_argument(
         "--suite",
         default="all",
-        help="Eval suite to run: all, architecture, cleanup, smoke.",
+        help="Eval suite to run: all, architecture, cleanup, llm_path, orpi, smoke.",
     )
     parser.add_argument(
         "--list",
@@ -22,7 +27,12 @@ def main():
 
     evals_dir = Path(__file__).parent
     selected_specs = select_eval_specs(args.suite)
+    expected_fail = args.suite == EXPECTED_FAIL_SUITE
     if not selected_specs:
+        if expected_fail:
+            print("Found 0 eval scripts to run for suite=expected_fail.")
+            print("No expected-fail probes are currently registered. ✅")
+            sys.exit(0)
         known = sorted(
             {"all"}
             | {
@@ -53,7 +63,6 @@ def main():
     
     # Expected-fail suite: a probe's FAILURE is the clean state; a PASS means the feature
     # landed and the probe should graduate into EVAL_SPECS.
-    expected_fail = args.suite == EXPECTED_FAIL_SUITE
     print(f"Found {len(eval_files)} eval scripts to run for suite={args.suite}.")
     if expected_fail:
         print("(expected-fail suite: a failing probe is the EXPECTED state; a pass graduates.)")
@@ -61,6 +70,13 @@ def main():
     failures = []
     graduates = []
     fallback_enabled = []
+
+    # Deterministic-gate guarantee: strip the live-LLM key for every suite except live_llm,
+    # so gate probes cannot make a real OpenRouter call (flaky / networked / costly). The
+    # live_llm suite passes the environment through; its probes skip when no key is present.
+    run_env = os.environ.copy()
+    if args.suite != LIVE_LLM_SUITE:
+        run_env.pop("OPENROUTER_API_KEY", None)
 
     for eval_file in eval_files:
         print(f"\n{'='*60}")
@@ -76,7 +92,7 @@ def main():
         print(f"Running {eval_file.name} ({mode})...")
         print(f"{'='*60}")
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
         passed = result.returncode == 0
 
         if expected_fail:

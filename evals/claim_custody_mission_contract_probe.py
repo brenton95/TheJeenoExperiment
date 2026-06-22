@@ -19,6 +19,9 @@ Checks:
   handle_utterance_mission_runs       — handle_utterance('mission: X; Y') returns MISSION result
   mission_complete_on_success         — 'MISSION COMPLETE' in response when tasks succeed
   mission_abort_on_failure            — 'MISSION ABORTED' when first step fails
+  conditional_contract_has_procedure  — conditional mission carries validated ProcedureRecipe
+  conditional_contract_binds_roles    — mission binds Sense, Spine, and composite task handles
+  conditional_ticket_carries_contract — execution authority carries the approved MissionContract
   task_instruction_no_regression      — 'go to the red door' still returns RUN COMPLETE
   sequence_instruction_no_regression  — 'go to the red door then go to the green door' still
                                         returns PROCEDURE COMPLETE
@@ -43,7 +46,11 @@ from minigrid.wrappers import FullyObsWrapper
 
 from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.memory import OperationalMemory
+from jeenom.mission_cortex import MissionCortex
 from jeenom.operator_station import ApprovedCommand, OperatorStationSession
+from jeenom.planning_semantics import default_planning_semantics
+from jeenom.capability_registry import CapabilityRegistry
+from jeenom.side_effect_authority import SideEffectAuthority
 from jeenom.schemas import (
     MissionContract,
     OPERATOR_INTENT_TYPES,
@@ -131,6 +138,52 @@ def main() -> int:
     )
     metrics["smoke_mission_step_count"] = (
         intent3.intent_type == "mission_contract" and len(intent3.mission_steps or []) == 3
+    )
+
+    # ── Conditional Sense/Cortex/Spine mission construction ──────────────────
+    conditional = compiler.compile_operator_intent(
+        "go straight until you see a blue door",
+        memory=memory,
+    )
+    mission_cortex = MissionCortex(
+        planning_semantics=default_planning_semantics(),
+        registry=CapabilityRegistry.minigrid_default(),
+    )
+    conditional_plan = mission_cortex.plan_conditional_evidence_action(
+        conditional,
+        utterance="go straight until you see a blue door",
+        active_claims=None,
+        claims_valid=False,
+        environment_identity=None,
+    )
+    conditional_contract = conditional_plan.mission_contract
+    metrics["conditional_contract_has_procedure"] = (
+        conditional_contract is not None
+        and conditional_contract.procedure is not None
+        and conditional_contract.procedure.validated
+        and conditional_contract.procedure.steps == ["act_until_evidence"]
+    )
+    metrics["conditional_contract_binds_roles"] = (
+        conditional_contract is not None
+        and conditional_contract.required_capabilities
+        == [
+            "sensing.find_object_by_color_type",
+            "action.move_forward",
+            "task.act_until_evidence",
+        ]
+        and conditional_plan.readiness_graph.graph_status == "executable"
+    )
+    conditional_ticket = SideEffectAuthority().issue_execution_ticket(
+        instruction=conditional_contract.description,
+        task_type=conditional_contract.procedure.task_type,
+        params=conditional_contract.params,
+        request_plan=conditional_plan.request_plan,
+        readiness_graph=conditional_plan.readiness_graph,
+        mission_id=conditional_contract.mission_id,
+        mission_contract=conditional_contract,
+    )
+    metrics["conditional_ticket_carries_contract"] = (
+        conditional_ticket.mission_contract is conditional_contract
     )
 
     # ── Station routing ────────────────────────────────────────────────────────

@@ -118,6 +118,13 @@ DIRECT_ACTION_SKILLS: frozenset[str] = frozenset(
 )
 
 SENSORY_COMMANDS: dict[str, SensoryCommand] = {
+    "act_until_evidence": SensoryCommand(
+        name="act_until_evidence",
+        required_claims=("object_location", "agent_pose"),
+        produced_claims=("target_visible", "target_location", "target_object"),
+        assumptions=("target predicate and authorized action are present in task params",),
+        failure_modes=("object_not_visible",),
+    ),
     "locate_object": SensoryCommand(
         name="locate_object",
         required_claims=("object_location", "agent_pose", "occupancy_grid"),

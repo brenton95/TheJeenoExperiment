@@ -70,6 +70,7 @@ class MiniGridOperationalContext(OperationalContext):
             grounding_semantics={
                 "visibility_model": "fully_observed_currently",
                 "object_types": ["door"],
+                "motor_object_terms": ["ball", "box", "door", "goal", "key", "target"],
                 "attribute_values": {
                     "color": ["red", "green", "blue", "yellow", "purple", "grey"],
                 },
@@ -99,6 +100,7 @@ class MiniGridOperationalContext(OperationalContext):
                 "target_label": "{color} {object_type}@({x},{y})",
                 "grounding_answer_header": "GROUNDING ANSWER",
                 "coordinate_frame": "minigrid_cell",
+                "scene_object_key": "doors",
             },
             environment_identity_fields=[
                 "env_id",

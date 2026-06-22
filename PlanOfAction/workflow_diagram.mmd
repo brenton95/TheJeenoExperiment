@@ -2,6 +2,8 @@
 config:
   layout: elk
 ---
+%% High-level architecture overview.
+%% Roadmap status lives only in task_plan.md; flow_of_control.mmd has the detailed turn flow.
 flowchart LR
 
   OP["OperatorStation<br>operator I/O + session"]
@@ -15,18 +17,20 @@ flowchart LR
   REG["CapabilityRegistry<br>contracts + context task families"]
   FP["Context fingerprint<br>cache / reuse boundary"]
   SLICE["Compact context slice<br>LLM only when needed"]
-  TEST["Phase 11B hostile eval ladder<br>same flow under paraphrases"]
-  ORPI["ORPI contract boundary (Phase 12)<br>SubstrateAdapter publishes OrpiContracts via OrpiManifest"]
-  EP["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
-  CONF["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
+  TEST["Architecture + LLM-path eval ladder<br>same typed flow under paraphrases"]
+  ORPI["ORPI v0.1 contract boundary<br>SubstrateAdapter publishes OrpiContracts via OrpiManifest"]
+  EP["LabelledEpisode<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
+  CONF["ORPI conformance probes<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
 
   subgraph ARCH["JEENOM WHAT"]
     TO["TurnOrchestrator<br>dispatch: 5 knowledge_type paths"]
-    IC["IntentCache<br>fast-path NLU (prim_def / concept_teach / forget)"]
-    CX["Cortex / LLM compiler + IntentVerifier<br>slow path: plan, repair, synthesize, ask"]
-    MC["MissionCortex<br>MissionContract / MissionExecutionPlan<br>compound mission lineage"]
+    IC["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
+    LLM["Default semantic router<br>strict JSON-schema OperatorIntent"]
+    FB["Deterministic compiler fallback<br>visible degraded-availability path"]
+    CX["Cortex + IntentVerifier<br>normalize, plan, repair, synthesize, ask"]
+    MC["MissionCortex<br>MissionContract + validated procedure<br>capabilities / params / lineage"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
-    KB["KnowledgeBase<br>claims + procedures + provenance"]
+    REP["Representation surface<br>current claims + durable knowledge<br>procedures + provenance"]
     SE["Sense<br>evidence requests -> observation claims"]
     SP["Spine<br>execution contracts -> execution claims"]
   end
@@ -39,16 +43,16 @@ flowchart LR
 
   OP -->|CorticalEnvelope| MSG
   MSG --> TO
-  TO -->|fast path hit| IC --> TO
-  TO -->|slow path miss| CX --> TO
-  SLICE -. "only for compile / repair / synthesis" .-> CX
-  TO -->|knowledge_type=action + compound| MC
-  TO -->|knowledge_type=action simple / procedure / provenance| RG
+  TO -->|bounded exact route| IC --> TO
+  TO -->|otherwise unresolved semantic input| LLM --> CX --> TO
+  LLM -. "key / transport / schema failure" .-> FB --> CX
+  SLICE -. "only for compile / repair / synthesis" .-> LLM
+  TO -->|compound mission| MC
+  TO -->|simple request| RG
   MC -->|RequestPlan + provenance| RG
   REG --> RG
   FP --> RG
-  KB -->|claim/procedure snapshot| RG
-  TO -->|knowledge_type=claim/control (no plan needed)| MSG
+  REP -->|claim/procedure snapshot| RG
   RG -->|ApprovedCommand + verdict| MSG
   MSG -->|CommandResult / clarification| OP
 
@@ -57,19 +61,24 @@ flowchart LR
   SE -->|sense HOW| SUB
   SUB -->|observation result| SE
   SE -->|ObservationClaim| MSG
-  MSG --> KB
+  MSG --> REP
 
-  RG -->|ExecutionTicket + mission lineage + ExecutionContract| MSG
+  RG -->|ExecutionTicket + mission lineage| MSG
+  MSG -->|authorize runtime entry| CX
+  CX -->|EvidenceFrame| MSG
+  MSG --> SE
+  CX -->|one ExecutionContract after fresh evidence| MSG
   MSG --> SP
   SP -->|action HOW| SUB
   SUB -->|execution result| SP
   SP -->|ExecutionClaim| MSG
-  MSG --> KB
+  MSG -->|ExecutionReport feedback| CX
+  MSG --> REP
 
   RG -->|MemoryWriteTicket| MSG
-  MSG --> KB
+  MSG --> REP
 
-  KB -->|updated snapshot| CX
+  REP -->|updated snapshot| CX
 
   TEST -. "low-level Sense paraphrases" .-> SE
   TEST -. "low-level Spine paraphrases" .-> SP
@@ -78,6 +87,6 @@ flowchart LR
 
   SUB -. "publishes capability contracts" .-> ORPI
   ORPI -. "registered manifest" .-> REG
-  OP -->|emit per executed turn (CommandAuthority.record_result)| EP
+  MSG -->|CommandResult projected by CommandAuthority.record_result| EP
   CONF -. "gates contract boundary" .-> ORPI
   CONF -. "turn round-trips to valid trace" .-> EP

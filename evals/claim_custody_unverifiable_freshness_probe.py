@@ -1,11 +1,11 @@
-"""Phase 13B red-bar: claim freshness under partial observability.
+"""Phase 13B: claim freshness under partial observability.
 
 Spike-first eval-first artifact. Asserts the freshness contract designed in
 task_plan.md Phase 13B, entirely SYNTHETICALLY (constructed claims/poses; no
-FullyObsWrapper change). Registered in the `expected_fail` suite: it is EXPECTED to
-fail on the current repo and graduates into the main suite when 13B turns it green.
+FullyObsWrapper change). It started in the `expected_fail` suite and graduated into the
+main suite when the 13B freshness kernel landed.
 
-Target contract (does not exist yet — that is the point):
+Target contract:
   - schemas.CLAIM_FRESHNESS gains "unverifiable" -> current | unverifiable | stale | unknown
   - jeenom/claim_freshness.py exposes:
       UNVERIFIABLE_DECAY_STEPS: int

@@ -12,9 +12,16 @@ tested in MiniGrid.
 
 ## Current Status
 
-JEENOM is an architecture prototype in MiniGrid. **Phase 10: Operator Station
-Extraction** is complete. The project now has eval-backed enforcement for the
-core architecture boundaries:
+JEENOM is an architecture prototype in MiniGrid. The current work is **Phase
+13B: partial observability, evidence gathering, and ask-for-help**. Completed
+13B slices include claim freshness, native MiniGrid FOV, typed
+`needs_evidence`, deterministic/LLM-path routing discipline, and continuous
+interactive episode ownership. Typed Cortex-owned conditional evidence missions
+are now implemented for requests such as "go straight until you see a blue
+door." The next work is broader bounded `search_allowed` evidence gathering and
+deterministic meta-primitives.
+
+The project has eval-backed enforcement for the core architecture boundaries:
 
 - canonical blocks: `OperatorStation`, `Cortex`, `ReadinessGraph`, `Sense`,
   `Spine`, `KnowledgeBase`, and `SubstrateAdapter`
@@ -35,13 +42,10 @@ reusable query primitives instead of unsupported text. Phase 11 moved inline
 compound metric missions into `MissionCortex`, with typed mission plans and
 mission-linked execution tickets.
 
-The current architecture task is **Phase 11B: hostile primitive and mission eval
-hardening**. The last green suite missed real REPL failures where equivalent
-operator phrasings did not reach the same typed plan. Phase 11B adds red-bar
-coverage for low-level Sense prompts, low-level Spine prompts, named procedural
-primitives, conditional Sense+Spine flow, distance-query paraphrases, compound
-missions, and negative controls. Phase 12 waits until that hostile ladder is
-green.
+Phase 11B, Phase 12/12D, and Phase 13A are complete. Operator-station
+decomposition is designed and banked for Phase 16; it remains deliberately
+parked while Phase 13B establishes the evidence and execution boundaries that
+the later kernel must own.
 
 The guiding split is:
 
@@ -65,6 +69,19 @@ Implemented so far:
   motor, and mission requests.
 - Typed LLM compiler boundary: LLMs emit schema objects; runtime validates and
   executes deterministic primitives.
+- The Operator Station defaults to the LLM compiler. Exact controls,
+  continuations, bounded `IntentCache` patterns, and the existing exact
+  command/status compatibility surface may resolve deterministically; otherwise
+  unresolved semantic input uses strict JSON-schema `OperatorIntent`
+  compilation. New semantic features should not be added as broad regex routes.
+- The current OpenRouter transport implements this tool-call boundary with
+  strict structured output (`response_format=json_schema`), not direct
+  provider-side function execution. The model chooses a typed decision; JEENOM
+  validates, authorizes, and executes it.
+- LLM and deterministic fallback decisions converge through canonical schema
+  normalization, `IntentVerifier`, capability/readiness checks, deterministic
+  dispatch, and typed tickets. Fallback is logged and route-provenance tested;
+  silent fallback is considered a regression.
 - Capability registry and command registry over task, grounding, sensing, action,
   and claims primitives.
 - Intent verification, capability matching, and arbitration to avoid silent
@@ -76,6 +93,10 @@ Implemented so far:
 - `CorticalEnvelope`, `ApprovedCommand`, `ExecutionTicket`, `RawMotorTicket`,
   `MemoryWriteTicket`, and `CommandResult` as the current execution-authority
   and trace objects.
+- `MissionContract` can carry a validated conditional `ProcedureRecipe` that
+  binds target sensing to one approved Spine action. Cortex re-senses and checks
+  the stop claim before every action; no-progress and budget exhaustion terminate
+  as typed failures.
 - Plan reuse, environment assumptions, stale-claim detection, mismatch detection,
   and early repair-loop scaffolding.
 - JIT procedure/sense/skill template caching with the invariant that rendered
@@ -112,10 +133,10 @@ Current architectural debt:
   proof system for arbitrary robot stacks.
 - Robotics-like and ARC-style substrate pressure remain future work.
 
-Current evals prove many control-plane invariants, but the Phase 11B work exists
-because the suite was not hostile enough to paraphrase brittleness and false
-success. Do not treat green eval numbers as proof of generalized cognition until
-the hostile primitive ladder and a robotics-like substrate both pass.
+Current evals prove many control-plane invariants, including the completed Phase
+11B hostile paraphrase ladder and deterministic/LLM routing parity. They still
+do not prove generalized cognition, cross-substrate transfer, or adversarial
+prompt safety.
 
 ## Architecture Invariants
 
@@ -138,7 +159,8 @@ the hostile primitive ladder and a robotics-like substrate both pass.
   - `ExecutionTicket` for task/runtime entry.
   - `RawMotorTicket` for explicit low-level motor action.
   - `MemoryWriteTicket` for durable operator-claim mutation.
-- Grounding claims are session-scoped and scene-fingerprinted.
+- Grounding claims are session-scoped and track current, unverifiable, stale,
+  and unknown freshness; looking away is not treated as a world mutation.
 - Operator claims are durable and invalidated only by explicit operator action.
 - Invalid or stale plan/claim reuse must never execute silently.
 - JEENOM must distinguish known, visible, inferred, stale, unknown, searchable,
@@ -148,6 +170,23 @@ the hostile primitive ladder and a robotics-like substrate both pass.
   must check preconditions, effects, required/produced claims, frames/units,
   safety class, authority, failure modes, validation hooks, and substrate
   fingerprint assumptions.
+
+## Known Limitations
+
+- **Threat model: good-faith operator assumed.** JEENOM currently assumes a non-adversarial
+  operator and a non-adversarial LLM backend. The architecture is *designed* to contain a
+  misbehaving model for the dangerous cases — the LLM only emits typed tool-call decisions
+  (its decision fields are enum-validated), unknown primitives are rejected, every side effect
+  is gated by station-minted tickets plus the `IntentVerifier` and `ReadinessGraph`, and no LLM
+  runs in the rendered control loop. **However, this containment is not yet hardened or proven
+  against hostile prompts, prompt injection, or jailbreaks.** The previously known
+  `grounding_query_plan.answer_fields` vocabulary gap is fixed by canonicalization and
+  fail-closed validation, but the complete LLM-controlled dispatch vocabulary and
+  side-effect-authority path have not yet received a hostile-input proof. Adversarial robustness
+  and a hostile tool-call/prompt-injection eval suite are deferred to **Phase 17** of the plan.
+  Do not run JEENOM for untrusted operators, or feed it untrusted text, until that work lands.
+- **Single substrate.** Only MiniGrid is ORPI-conformant today; substrate-independence is
+  validated later (AI2-THOR spike, Phases 14–15).
 
 ## Environment
 
@@ -170,13 +209,16 @@ Run the operator station:
 python run_operator_station.py
 ```
 
-For live LLM compilation, set an OpenRouter API key:
+The operator station defaults to `--compiler llm`. For live LLM compilation,
+set an OpenRouter API key:
 
 ```bash
 export OPENROUTER_API_KEY="your-api-key-here"
 ```
 
-Without an API key, many probes use the deterministic smoke-test compiler.
+Without an API key, the Operator Station uses the deterministic smoke-test
+compiler as a visible degraded-availability fallback. At runtime, the station
+prints whether the LLM is live or whether that fallback is active.
 
 ## Verification
 
@@ -207,33 +249,21 @@ python -m pytest -q tests
 Avoid treating whole-repo `pytest` as the primary project signal right now,
 because the local `Minigrid/` tree can introduce unrelated dependency noise.
 
-Last green baseline before Phase 11B hostile evals:
+Current green baseline:
 
-- `python evals/eval_master.py --suite cleanup`: 25/25 passing.
-- `python evals/eval_master.py`: 54/54 passing.
-- `python -m pytest -q tests`: 244 passed.
-
-Phase 11B red-bar status:
-
-- `python evals/phase11b_primitive_ladder_probe.py`: failing with named
-  violated invariants.
-- `python -m pytest -q tests/test_phase11b_primitive_ladder.py`: 13 failed,
-  2 passed.
-- `python evals/eval_master.py --suite cleanup --list`: 26 selected probes,
-  including `phase11b_primitive_ladder_probe.py`.
-
-Cleanup/all evals are expected to fail until the Phase 11B fixes are
-implemented.
+- `python evals/eval_master.py`: 78/78 passing.
+- `python evals/eval_master.py --suite orpi`: 10/10 passing.
+- `python evals/eval_master.py --suite cleanup`: 30/30 passing.
+- `python evals/eval_master.py --suite llm_path`: 5/5 passing.
+- `python -m pytest -q tests`: 322 passed, 1 warning, 12 subtests passed.
+- `python evals/eval_master.py --suite live_llm`: opt-in, 1/1 with a configured key.
 
 Roadmap:
 
-- Phase 10: complete for now. Operator-station boundary cleanup and
-  operator-defined query primitive assembly are done.
-- Phase 11A: complete. Inline compound metric missions are Cortex-owned,
-  claim-backed, ticketed, and protected by mission-flow evals.
-- Phase 11B: current. Add hostile evals for Sense/Spine/procedure/conditional
-  and compound mission paraphrase ladders.
-- Phase 12: add the minimal evidence-planning loop after 11B is green.
-- Phase 13: demonstrate the same cognition loop on MiniGrid and a robotics-like
-  substrate.
-- Phase 14: pressure the same architecture with an ARC-style steerable prototype.
+- Phase 13B: current. Conditional evidence missions are complete; bounded
+  `search_allowed` evidence gathering and deterministic meta-primitives remain.
+- Phase 13C: curriculum, knowledge reuse, and intervention metrics.
+- Phase 14: cheap substrate-leak removal plus an AI2-THOR discovery spike.
+- Phase 15: committed cross-substrate demonstration and ORPI v1 freeze.
+- Phase 16: operational hardening and the banked station decomposition.
+- Phase 17: capability stress and adversarial/hostile-input hardening.

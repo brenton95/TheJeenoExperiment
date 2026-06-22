@@ -2,6 +2,8 @@
 config:
   layout: elk
 ---
+%% Detailed current turn/runtime flow.
+%% Roadmap status lives only in task_plan.md.
 flowchart TD
 
   Runtime["Runtime package<br>SubstrateAdapter + OperationalContext"]
@@ -11,22 +13,24 @@ flowchart TD
   Fingerprint["Context fingerprint<br>cache/reuse boundary"]
   Cache["Plan/template cache<br>keyed by context fingerprint"]
   Slice["Compact context slice<br>only when LLM needs it"]
-  EvalLadder["Phase 11B hostile eval ladder<br>sense / spine / procedure / conditional / mission"]
-  OrpiManifest["ORPI manifest (Phase 12)<br>SubstrateAdapter publishes OrpiContracts<br>(+ symbol_mappings / frames / units / risk_policy)"]
-  Episode["LabelledEpisode (Phase 12)<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
-  OrpiConf["ORPI conformance probes (Phase 12)<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
+  EvalLadder["Architecture + LLM-path eval ladder<br>sense / cortex / spine / conditional / mission"]
+  OrpiManifest["ORPI v0.1 manifest<br>SubstrateAdapter publishes OrpiContracts<br>(+ symbol_mappings / frames / units / risk_policy)"]
+  Episode["LabelledEpisode<br>intent / grounding / plan / authority<br>execution / verification / attribution / steering"]
+  OrpiConf["ORPI conformance probes<br>contract coverage / manifest-at-init / postcondition<br>cadence / no-LLM-in-loop / labelled-episode"]
 
   Start["Operator utterance"]
   Station["OperatorStation<br>wrap as CorticalEnvelope"]
   SchemaIn["Schema gate<br>validate typed input"]
   Orch["TurnOrchestrator<br>pending-state check → route intent"]
-  IntentCache["IntentCache<br>precompiled fast-path NLU<br>(prim_def / concept_teach / concept_forget)"]
-  LLM["LLM compiler + IntentVerifier<br>slow path for unresolved utterances"]
+  IntentCache["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
+  LLM["Default semantic router<br>LLM strict JSON-schema OperatorIntent"]
+  Fallback["Deterministic compiler fallback<br>visible degraded-availability path"]
+  Normalize["Deterministic normalization + IntentVerifier<br>canonical vocabulary / semantic preservation"]
   Intent["OperatorIntent<br>fast or slow path merge here"]
   Dispatch["TurnOrchestrator.dispatch<br>5 knowledge_type paths<br>claim / procedure / provenance / action / control"]
-  Mission["MissionCortex<br>MissionContract / MissionExecutionPlan if compound"]
+  Mission["MissionCortex<br>MissionContract + validated procedure<br>capabilities / params / lineage"]
   Plan["Cortex<br>build RequestPlan"]
-  Snapshot["KnowledgeBase<br>claim/procedure snapshot"]
+  Snapshot["Representation / Knowledge snapshot<br>current claims + durable procedures"]
   Ready["ReadinessGraph<br>context + contracts + claims + authority"]
   Gate["ApprovedCommand"]
 
@@ -40,14 +44,15 @@ flowchart TD
   Context --> Slice
 
   Start --> Station --> SchemaIn --> Orch
-  Orch -->|fast path| IntentCache --> Intent
-  Orch -->|slow path| LLM --> Intent
+  Orch -->|bounded exact route| IntentCache --> Intent
+  Orch -->|otherwise unresolved semantic input| LLM --> Normalize --> Intent
+  LLM -. "key / transport / schema failure" .-> Fallback --> Normalize
   Slice -. "compact LLM context if needed" .-> LLM
   Intent --> Dispatch
   Dispatch -->|knowledge_type=procedure/provenance| Plan
   Dispatch -->|knowledge_type=action + compound| Mission --> Plan
   Dispatch -->|knowledge_type=action simple| Plan
-  Dispatch -->|knowledge_type=claim/control| Gate
+  Dispatch -->|knowledge_type=claim/control| Plan
   Plan --> Ready
   Registry --> Ready
   Fingerprint --> Ready
@@ -58,27 +63,34 @@ flowchart TD
   Gate -->|ask / clarify / refuse / answer| Result["CommandResult<br>with provenance"]
   Result --> End["Await next steering"]
 
-  Gate -->|needs evidence| EvidenceMsg["EvidenceFrame"]
-  EvidenceMsg --> Sense["Sense<br>architecture WHAT"]
+  Sense["Sense<br>architecture WHAT"]
   Sense --> SenseHow["SubstrateAdapter<br>sensing HOW"]
   Substrate --> SenseHow
   SenseHow --> Observation["ObservationClaim<br>source + confidence + freshness"]
-  Observation --> KnowledgeWrite["KnowledgeBase<br>record claim/provenance"]
+  Observation --> KnowledgeWrite["Representation surface<br>record evidence + provenance"]
   KnowledgeWrite --> Snapshot
 
   Gate -->|memory update| MemoryTicket["MemoryWriteTicket"]
-  MemoryTicket --> OperatorClaim["KnowledgeBase<br>record operator claim/procedure"]
+  MemoryTicket --> OperatorClaim["KnowledgeBase<br>record durable operator claim/procedure"]
   OperatorClaim --> Snapshot
+  OperatorClaim --> Result
 
-  Gate -->|task executable| ExecTicket["ExecutionTicket<br>mission_id + parent_request_id when compound"]
-  ExecTicket --> Spine["Spine<br>ExecutionContract"]
+  Gate -->|task executable| ExecTicket["ExecutionTicket<br>authorizes mission/runtime entry"]
+  ExecTicket --> RuntimeLoop["Cortex runtime loop<br>fresh sense → evaluate mission condition<br>→ choose at most one skill"]
+  RuntimeLoop -->|EvidenceFrame| Sense
+  Observation --> RuntimeLoop
+  RuntimeLoop --> Contract["ExecutionContract<br>one approved skill"]
+  Contract --> Spine["Spine<br>execute contract only"]
   Spine --> ActionHow["SubstrateAdapter<br>action/planner/controller HOW"]
   Substrate --> ActionHow
-  ActionHow --> ExecClaim["ExecutionClaim<br>result + provenance"]
+  ActionHow --> ExecClaim["ExecutionReport / ExecutionClaim<br>result + provenance"]
+  ExecClaim --> RuntimeLoop
   ExecClaim --> KnowledgeWrite
+  RuntimeLoop -->|mission terminal| Result
 
   Gate -->|explicit motor| MotorTicket["RawMotorTicket"]
   MotorTicket --> Spine
+  Spine -->|explicit motor result| Result
 
   EvalLadder -. "paraphrase equivalence" .-> Intent
   EvalLadder -. "primitive-role checks" .-> Ready
@@ -87,8 +99,7 @@ flowchart TD
 
   Substrate -. "publishes capability contracts" .-> OrpiManifest
   OrpiManifest --> Registry
-  KnowledgeWrite -->|emit per executed turn| Episode
-  Result -->|emit per executed turn| Episode
+  Result -->|CommandAuthority.record_result projects trace| Episode
   OrpiConf -. "gates contract boundary" .-> OrpiManifest
   OrpiConf -. "no deliberative meta in compiled plan" .-> Ready
   OrpiConf -. "turn round-trips to valid trace" .-> Episode

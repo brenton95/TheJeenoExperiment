@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
-from .command_registry import evidence_needs_for_step
+from .command_registry import DIRECT_ACTION_SKILLS, evidence_needs_for_step
 from .schemas import (
     EvidenceFrame,
     ExecutionContract,
@@ -60,6 +60,19 @@ class Cortex:
         self.procedure = procedure
         self.resolved_task_params = self.memory.resolve_target_params(task_request.params)
         self.memory.reset_episode(clear_reference_context=False)
+        self.execution_state.update(
+            {
+                "step_index": 0,
+                "task_complete": False,
+                "task_failed": False,
+                "failure_reason": None,
+                "current_skill": None,
+                "last_report": None,
+                "conditional_last_pose": None,
+                "conditional_action_pending": False,
+                "knowledge_override_active": False,
+            }
+        )
 
         color_override = (
             task_request.params.get("color") is not None
@@ -89,6 +102,13 @@ class Cortex:
 
     def make_evidence_frame(self):
         self._advance_completed_steps()
+        if self.execution_state.get("task_failed"):
+            return EvidenceFrame(
+                needs=[],
+                context=dict(self.resolved_task_params),
+                active_step=self._current_step_name(),
+                step_index=self.execution_state["step_index"],
+            )
         active_step = self._current_step_name()
 
         if active_step is None:
@@ -113,6 +133,29 @@ class Cortex:
         return frame
 
     def update_from_evidence(self, evidence, world_sample=None):
+        active_step = self._current_step_name()
+        if active_step == "act_until_evidence":
+            pose = evidence.claims.get("agent_pose")
+            prior_pose = self.execution_state.get("conditional_last_pose")
+            if self.execution_state.get("conditional_action_pending"):
+                stop_claim = str(self.resolved_task_params.get("stop_claim") or "")
+                stop_value = self.resolved_task_params.get("stop_value", True)
+                condition_met = evidence.claims.get(stop_claim) == stop_value
+                if not condition_met and pose == prior_pose:
+                    self.execution_state["task_failed"] = True
+                    self.execution_state["failure_reason"] = "no_progress"
+                    self.record_trace(
+                        "conditional_mission_failed",
+                        {
+                            "reason": "no_progress",
+                            "action_name": self.resolved_task_params.get("action_name"),
+                            "agent_pose": pose,
+                        },
+                        step_name=active_step,
+                    )
+                self.execution_state["conditional_action_pending"] = False
+            self.execution_state["conditional_last_pose"] = pose
+
         for k, v in evidence.claims.items():
             self.set_claim(k, v, source=evidence.source)
         if world_sample is not None:
@@ -122,10 +165,13 @@ class Cortex:
             {"claims": evidence.claims},
             step_name=self._current_step_name(),
         )
-        self._advance_completed_steps()
+        if not self.execution_state.get("task_failed"):
+            self._advance_completed_steps()
 
     def choose_execution_contract(self):
         self._advance_completed_steps()
+        if self.execution_state.get("task_failed"):
+            return None
         active_step = self._current_step_name()
         if active_step is None:
             self.execution_state["task_complete"] = True
@@ -150,15 +196,31 @@ class Cortex:
             skill = "turn_right"
         elif active_step in {"navigate_to_object", "verify_adjacent"}:
             skill = "navigate_to_object" if self.get_claim("target_location") else "turn_right"
+        elif active_step == "act_until_evidence":
+            skill = str(self.resolved_task_params.get("action_name") or "")
+            if skill not in DIRECT_ACTION_SKILLS or skill in {"done"}:
+                self.execution_state["task_failed"] = True
+                self.execution_state["failure_reason"] = "invalid_conditional_action"
+                self.record_trace(
+                    "conditional_mission_failed",
+                    {"reason": "invalid_conditional_action", "action_name": skill},
+                    step_name=active_step,
+                )
+                return None
         elif active_step == "done":
             skill = "done"
         else:
             skill = "abort"
 
+        stop_conditions = ["adjacent_to_target", "task_complete"]
+        if active_step == "act_until_evidence":
+            stop_conditions = [
+                str(self.resolved_task_params.get("stop_claim") or "target_visible")
+            ]
         contract = ExecutionContract(
             skill=skill,
             params=params,
-            stop_conditions=["adjacent_to_target", "task_complete"],
+            stop_conditions=stop_conditions,
             source="cortex",
         )
         self.execution_state["current_skill"] = skill
@@ -171,6 +233,12 @@ class Cortex:
 
     def update_from_report(self, report):
         self.execution_state["last_report"] = asdict(report)
+        if self._current_step_name() == "act_until_evidence":
+            if report.status == "failed":
+                self.execution_state["task_failed"] = True
+                self.execution_state["failure_reason"] = report.reason or "execution_failed"
+            elif report.progress.get("executed_action") is not None:
+                self.execution_state["conditional_action_pending"] = True
         if self.execution_state["current_skill"] == "done" and report.status == "succeeded":
             self.execution_state["task_complete"] = True
 
@@ -212,6 +280,8 @@ class Cortex:
         )
 
     def _advance_completed_steps(self):
+        if self.execution_state.get("task_failed"):
+            return
         while True:
             active_step = self._current_step_name()
             if active_step is None:
@@ -230,6 +300,19 @@ class Cortex:
         return self.procedure.steps[idx]
 
     def _step_complete(self, step_name):
+        if step_name == "act_until_evidence":
+            stop_claim = str(
+                self.resolved_task_params.get("stop_claim") or "target_visible"
+            )
+            stop_value = self.resolved_task_params.get("stop_value", True)
+            condition_met = self.get_claim(stop_claim) == stop_value
+            if condition_met:
+                self.record_trace(
+                    "conditional_stop_condition_satisfied",
+                    {"claim": stop_claim, "value": stop_value},
+                    step_name=step_name,
+                )
+            return condition_met
         if step_name == "locate_object":
             return self.has_claim("target_location")
         if step_name in {"navigate_to_object", "verify_adjacent"}:

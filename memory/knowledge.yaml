@@ -1,6 +1,6 @@
 target_color: "red"
 target_type: "door"
 delivery_target: {"color": "red", "object_type": "door"}
-last_task_type: "go_to_object"
-last_instruction: "go to the purple door"
-primitive_definitions: {"ramesian": {"definition_type": "distance_metric", "name": "ramesian", "normalized_name": "ramesian", "expression": {"op": "max", "metrics": ["euclidean", "manhattan"]}, "dependencies": ["euclidean", "manhattan"], "dependency_handles": ["grounding.all_doors.ranked.euclidean.agent", "grounding.all_doors.ranked.manhattan.agent"], "proposed_handle": "grounding.all_doors.ranked.ramesian.agent", "safety_class": "query", "authority_level": "operator", "provenance": {"operator_utterance": "create a new distance metric called ramesian which is the max of euclidean and manhattan distance", "formula": "the max of euclidean and manhattan distance", "approval_utterance": "yes", "registered_handle": "grounding.all_doors.ranked.ramesian.agent"}}}
+last_task_type: null
+last_instruction: null
+primitive_definitions: {}

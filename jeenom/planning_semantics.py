@@ -28,6 +28,18 @@ class PlanningSemantics:
         return self.object_types[0] if self.object_types else None
 
     @property
+    def motor_object_terms(self) -> tuple[str, ...]:
+        """Object words that, following a pickup/toggle verb, mark an utterance as
+        an object task rather than a bare motor command. Domain-configured; falls
+        back to the navigation object vocabulary when unspecified."""
+        terms = self.operational_context.grounding_semantics.get("motor_object_terms")
+        if isinstance(terms, list):
+            configured = tuple(str(term) for term in terms if isinstance(term, str))
+            if configured:
+                return configured
+        return self.object_types
+
+    @property
     def metrics(self) -> tuple[str, ...]:
         metrics = self.operational_context.grounding_semantics.get("distance_metrics", [])
         if not isinstance(metrics, list):

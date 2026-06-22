@@ -18,15 +18,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from jeenom.llm_compiler import CompilerBackend, SmokeTestCompiler
+from jeenom.minigrid_runtime_package import build_minigrid_runtime_package
 from jeenom.operator_station import OperatorStationSession
 
 
 def build_env(env_id: str, render_mode: str):
-    return FullyObsWrapper(gym.make(env_id))
+    kwargs: dict[str, Any] = {}
+    if render_mode != "none":
+        kwargs["render_mode"] = render_mode
+    return FullyObsWrapper(gym.make(env_id, **kwargs))
+
+
+def build_partial_env(env_id: str, render_mode: str):
+    kwargs: dict[str, Any] = {}
+    if render_mode != "none":
+        kwargs["render_mode"] = render_mode
+    return gym.make(env_id, **kwargs)
 
 
 def patched_env_builder():
     return patch("jeenom.run_demo.build_env", side_effect=build_env)
+
+
+def patched_partial_env_builder():
+    return patch("jeenom.run_demo.build_env", side_effect=build_partial_env)
 
 
 def make_session(
@@ -38,8 +53,11 @@ def make_session(
     compiler: CompilerBackend | None = None,
     compiler_name: str = "smoke",
     max_loops: int | None = None,
+    observability: str = "full",
     **kwargs: Any,
 ) -> OperatorStationSession:
+    if observability not in {"full", "partial"}:
+        raise ValueError("observability must be 'full' or 'partial'")
     params: dict[str, Any] = {
         "compiler": compiler or SmokeTestCompiler(),
         "compiler_name": compiler_name,
@@ -48,6 +66,12 @@ def make_session(
         "render_mode": render_mode,
         "memory_root": memory_root or Path(tempfile.mkdtemp()),
     }
+    if "runtime_package" not in kwargs:
+        params["runtime_package"] = build_minigrid_runtime_package(
+            env_id=env_id,
+            render_mode=render_mode,
+            observability=observability,
+        )
     if max_loops is not None:
         params["max_loops"] = max_loops
     params.update(kwargs)

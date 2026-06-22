@@ -5,8 +5,8 @@ Phase 15 cross-substrate port (the validation event). Standards extracted from n
 ossify the wrong abstractions; v0.1 exists to be broken by the second substrate, deliberately.
 
 This document is the authoritative contract/manifest/procedure/trace reference for ORPI. It is built
-and versioned alongside the code. The implementation roadmap lives in
-[task_plan.md](task_plan.md) Phase 12.
+and versioned alongside the code. It does not track current phase status; the implementation
+roadmap lives in [task_plan.md](task_plan.md).
 
 ---
 
@@ -77,7 +77,7 @@ additions; everything else already exists in the repo.
 
 | Field | Meaning | Notes |
 |---|---|---|
-| `name`, `primitive_type`, `layer`, `description` | identity | `OrpiContract.primitive_type` ∈ {sense, actuation, meta} (mapped from legacy values by `orpi_primitive_type_for()`); `layer` ∈ {sense, cortex, spine} |
+| `name`, `primitive_type`, `layer`, `description` | identity | `OrpiContract.primitive_type` ∈ {sense, actuation, meta} (mapped from legacy values by `orpi_primitive_type_for()`); `layer` remains the implementation/registry grouping during the v0.1 compatibility bridge |
 | `inputs` / `outputs` | typed parameters | continuous params (grasp pose, force threshold) live here — the symbol layer passes them through, never chooses them |
 | `preconditions` | claims that must hold, with min confidence | evaluated by ReadinessGraph |
 | `postconditions` | **object-centric state deltas** (Δg), not action descriptions | "door(d).state: closed→open", not "arm moved" — this is what makes procedures retargetable across embodiments |
@@ -155,7 +155,7 @@ verification    — postcondition_primitive results vs. predicted postconditions
 attribution     — on failure: which contract was violated                        [*]
                   (stale_claim | miscompiled_intent | unmet_postcondition |
                    missing_authority | substrate_fault)
-steering        — any operator interventions in this episode (Phase 13 ask-for-help)
+steering        — operator interventions, clarifications, and active steering
                   + KB writes and per-scope KB reuse counters
 ```
 
@@ -170,7 +170,8 @@ component-level credit assignment — and the most incomplete in v0.
   `timeout → substrate_fault`. The raw category is preserved alongside.
 
 Rich Δg verification (invoking the checker against a re-observed state rather than the execution
-result already in `final_state`) is Phase 13 work — it requires the derived-claim layer.
+result already in `final_state`) remains future runtime-verification work tracked in
+`task_plan.md`.
 
 The trace is the product's audit story ("what did the operator tell it, when, and did the robot
 honour it") and the learning story (component-level credit assignment for deployment loops) in one
@@ -196,7 +197,7 @@ derives broader scopes from ORPI contracts: direct substrate-fingerprinted primi
 
 `KnowledgeChannel` is the gated write/read surface used by station/orchestration paths. It enforces
 writer identity by scope, emits durable KB writes into `LabelledEpisode.steering.knowledge`, and
-records per-scope reuse counters for Phase 13 transfer metrics.
+records per-scope reuse counters for the planned curriculum/reuse evaluation.
 
 ## 9. Conformance
 

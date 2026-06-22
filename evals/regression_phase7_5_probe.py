@@ -189,18 +189,24 @@ def _check_scene_model(checks: dict[str, bool]) -> None:
     checks["scene_summary_has_source"] = "source=" in scene_text
     checks["scene_summary_has_doors"] = "doors=" in scene_text
 
-    # 6. Scene model cleared on reset, rebuilt on next query
+    # 6. Scene model replaced with a fresh seeded idle scene on explicit reset
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         session6 = _make_session()
         session6.handle_utterance("go to the red door")
-        had_scene = session6.memory.scene_model is not None
+        previous_scene = session6.memory.scene_model
         session6.reset()
-        cleared = session6.memory.scene_model is None
-        session6._ensure_scene_model()
-        rebuilt = session6.memory.scene_model is not None
+        reset_scene = session6.memory.scene_model
 
-    checks["scene_model_cleared_on_reset"] = had_scene and cleared
-    checks["scene_model_rebuilt_after_reset"] = rebuilt
+    checks["scene_model_replaced_on_reset"] = (
+        previous_scene is not None
+        and reset_scene is not None
+        and reset_scene is not previous_scene
+    )
+    checks["scene_model_refreshed_after_reset"] = (
+        reset_scene is not None
+        and reset_scene.source == "idle_sense"
+        and reset_scene.step_count == 0
+    )
 
 
 # ── Phase 7.58: Active Claims ────────────────────────────────────────────────

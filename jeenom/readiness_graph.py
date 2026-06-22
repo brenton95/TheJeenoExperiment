@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .capability_registry import CapabilityRegistry
 from .schemas import (
     EnvironmentAssumption,
@@ -120,6 +122,53 @@ def _claims_status(
     return None, None
 
 
+def _evidence_status(
+    step: RequestPlanStep,
+    *,
+    evidence_state: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if evidence_state is None:
+        return None, None
+    required = step.constraints.get("requires_visible_objects") or []
+    if isinstance(required, str):
+        required = [required]
+    required_types = {str(item) for item in required if item is not None}
+    if not required_types:
+        return None, None
+    evidence_scope = str(step.constraints.get("evidence_scope") or "visible_only")
+    if evidence_scope != "visible_only":
+        return None, None
+    if evidence_state.get("observation_model") != "agent_fov":
+        return None, None
+    try:
+        unseen_count = int(evidence_state.get("unseen_cell_count") or 0)
+    except (TypeError, ValueError):
+        unseen_count = 0
+    if unseen_count <= 0:
+        return None, None
+
+    visible_objects = evidence_state.get("visible_objects") or []
+    visible_types: set[str] = set()
+    if isinstance(visible_objects, list):
+        for item in visible_objects:
+            if isinstance(item, dict):
+                obj_type = item.get("object_type", item.get("type"))
+                if obj_type is not None:
+                    visible_types.add(str(obj_type))
+            elif item is not None:
+                visible_types.add(str(item))
+    if visible_types.intersection(required_types):
+        return None, None
+    return (
+        "needs_evidence",
+        (
+            "Visible-only evidence is insufficient for this step: "
+            f"requires one of {sorted(required_types)}, but none are visible "
+            f"and {unseen_count} cells remain unseen."
+        ),
+    )
+
+
 def _actual_for_assumption(
     assumption: EnvironmentAssumption,
     environment_identity: EnvironmentIdentity | None,
@@ -185,6 +234,7 @@ def evaluate_request_plan(
     environment_identity: EnvironmentIdentity | None = None,
     knowledge_snapshot: KnowledgeSnapshot | None = None,
     risk_policy: dict[str, object] | None = None,
+    evidence_state: dict[str, Any] | None = None,
 ) -> ReadinessGraph:
     if knowledge_snapshot is not None:
         if active_claims is None:
@@ -254,6 +304,13 @@ def evaluate_request_plan(
                     reason = claims_reason or ""
                 else:
                     status, reason = _status_for_primitive(step, registry)
+                    evidence_status, evidence_reason = _evidence_status(
+                        step,
+                        evidence_state=evidence_state,
+                    )
+                    if status == "executable" and evidence_status is not None:
+                        status = evidence_status
+                        reason = evidence_reason or ""
 
         statuses_by_step[step.step_id] = status
         outputs_by_step[step.step_id] = set(step.outputs or [])
@@ -314,6 +371,8 @@ def _next_action(
             return "refuse"
         return "answer_query"
     if graph_status == "needs_clarification":
+        return "ask_clarification"
+    if graph_status == "needs_evidence":
         return "ask_clarification"
     if graph_status == "needs_authorization":
         return "ask_authorization"

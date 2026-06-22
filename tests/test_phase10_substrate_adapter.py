@@ -74,6 +74,44 @@ class TestPhase10SubstrateAdapter(unittest.TestCase):
         self.assertIs(substrate.task_adapter, open_adapter)
         self.assertIs(captured["skip_reset"], True)
 
+    def test_task_episode_reuses_any_open_adapter_without_reset(self):
+        for render_mode, adapter_role in (
+            ("human", "preview_adapter"),
+            ("none", "task_adapter"),
+            ("rgb_array", "task_adapter"),
+        ):
+            with self.subTest(render_mode=render_mode, adapter_role=adapter_role):
+                substrate = MiniGridSubstrateAdapter(
+                    env_id="MiniGrid-GoToDoor-8x8-v0",
+                    render_mode=render_mode,
+                )
+                open_adapter = object()
+                setattr(substrate, adapter_role, open_adapter)
+                captured: dict[str, object] = {}
+
+                def fake_run_episode(**kwargs):
+                    captured.update(kwargs)
+                    return {"_render_adapter": kwargs["render_adapter"], "ok": True}
+
+                with patch("jeenom.run_demo.run_episode", side_effect=fake_run_episode):
+                    result = substrate.run_task_episode(
+                        instruction="go to the grey door",
+                        compiler_name="smoke",
+                        compiler=SmokeTestCompiler(),
+                        seed=18,
+                        max_loops=64,
+                        memory=OperationalMemory(),
+                        plan_cache=PlanCache(enabled=True),
+                        progress_callback=None,
+                    )
+
+                self.assertTrue(result["ok"])
+                self.assertIs(captured["render_adapter"], open_adapter)
+                self.assertIs(captured["skip_reset"], True)
+                self.assertIs(captured["keep_render_open"], True)
+                self.assertIs(substrate.task_adapter, open_adapter)
+                self.assertIsNone(substrate.preview_adapter)
+
     def test_spine_treats_zero_length_navigation_path_as_already_at_goal(self):
         spine = MiniGridSpine(
             OperationalMemory(),

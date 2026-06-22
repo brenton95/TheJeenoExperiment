@@ -12,7 +12,7 @@ from .primitive_library import (
     TASK_PRIMITIVES,
     PrimitiveSpec as RuntimePrimitiveSpec,
 )
-from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector, get_registered_object_types
+from .schemas import PrimitiveManifest, PrimitiveSpec, TargetSelector
 
 
 def _orpi_postcondition_primitive(layer: str, spec: RuntimePrimitiveSpec) -> str | None:
@@ -442,14 +442,15 @@ class CapabilityRegistry:
                 "primitive": None,
                 "reason": "No target selector was provided.",
             }
-        target_selector = TargetSelector.from_dict(selector)
-        if target_selector.object_type not in get_registered_object_types():
-            return {
-                "status": "unsupported",
-                "layer": "grounding",
-                "primitive": None,
-                "reason": f"Object type '{target_selector.object_type}' is not in registered vocabulary.",
-            }
+        raw_object_type = selector.get("object_type")
+        target_selector = TargetSelector.from_dict(
+            selector,
+            object_types=(
+                [raw_object_type]
+                if isinstance(raw_object_type, str)
+                else []
+            ),
+        )
         primitive_name = self._primitive_name_for_selector(target_selector)
         if primitive_name is None:
             return {
@@ -466,13 +467,24 @@ class CapabilityRegistry:
         task_type: str | None,
         object_type: str | None,
     ) -> dict[str, Any]:
-        registered = get_registered_object_types()
-        if task_type == "go_to_object" and object_type in registered:
-            return self._readiness_for_primitive(f"task.go_to_object.{object_type}")
-        if task_type == "pickup" and object_type == "key":
-            return self._readiness_for_primitive("task.pickup.key")
-        if task_type in {"open", "unlock", "open_or_unlock"} and object_type in registered:
-            return self._readiness_for_primitive(f"task.open_or_unlock.{object_type}")
+        if task_type is None or object_type is None:
+            return {
+                "status": "unsupported",
+                "layer": "task",
+                "primitive": None,
+                "reason": (
+                    f"No task primitive supports task_type={task_type} "
+                    f"object_type={object_type}."
+                ),
+            }
+        handle_task_type = (
+            "open_or_unlock"
+            if task_type in {"open", "unlock", "open_or_unlock"}
+            else task_type
+        )
+        primitive_name = f"task.{handle_task_type}.{object_type}"
+        if self.lookup(primitive_name) is not None:
+            return self._readiness_for_primitive(primitive_name)
         return {
             "status": "unsupported",
             "layer": "task",
@@ -573,25 +585,23 @@ class CapabilityRegistry:
             if selector.distance_metric is None or selector.distance_reference is None:
                 return None
             return (
-                f"grounding.closest_door.{selector.distance_metric}."
+                f"grounding.closest_{selector.object_type}.{selector.distance_metric}."
                 f"{selector.distance_reference}"
             )
         if selector.relation in {None, "unique"}:
-            return "grounding.unique_door.color_filter"
+            return f"grounding.unique_{selector.object_type}.color_filter"
         return None
 
     def ranked_metric_handles(self) -> dict[str, str]:
         """Return {metric_name: handle} for all registered ranked-grounding primitives.
 
-        Identifies primitives by the 'ranked_door_list' output claim and extracts
-        the metric name from the handle. This is the authoritative source for which
-        metric names exist — no caller should hardcode those names.
+        Identifies primitives by the typed handle segment ``.ranked.<metric>.``
+        and extracts the metric name. Output claim names are intentionally not
+        used because legacy MiniGrid claims still contain ``door`` vocabulary.
         """
         result: dict[str, str] = {}
         for spec in self.manifest.primitives:
             if spec.layer != "grounding":
-                continue
-            if "ranked_door_list" not in (spec.outputs or []):
                 continue
             parts = spec.name.split(".")
             try:

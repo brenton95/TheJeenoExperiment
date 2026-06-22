@@ -98,7 +98,7 @@ CLAIM_STATUSES = (
     "invalidated",
     "unknown",
 )
-CLAIM_FRESHNESS = ("current", "stale", "unknown")
+CLAIM_FRESHNESS = ("current", "unverifiable", "stale", "unknown")
 CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
@@ -122,13 +122,22 @@ def get_registered_object_types() -> tuple[str, ...]:
     return _REGISTERED_OBJECT_TYPES if _REGISTERED_OBJECT_TYPES is not None else ()
 
 
-def _validate_object_type(value: str | None, label: str) -> None:
+def _validate_object_type(
+    value: str | None,
+    label: str,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> None:
     if value is None:
         return
-    if _REGISTERED_OBJECT_TYPES is not None and value not in _REGISTERED_OBJECT_TYPES:
+    allowed = (
+        tuple(object_types)
+        if object_types is not None
+        else _REGISTERED_OBJECT_TYPES
+    )
+    if allowed is not None and value not in allowed:
         raise SchemaValidationError(
             f"{label} object_type '{value}' is not in registered vocabulary: "
-            f"{', '.join(_REGISTERED_OBJECT_TYPES)}"
+            f"{', '.join(allowed)}"
         )
 OPERATOR_REFERENCES = ("delivery_target", "last_target", "last_task")
 OPERATOR_SELECTOR_RELATIONS = ("closest", "unique")
@@ -137,6 +146,19 @@ OPERATOR_DISTANCE_REFERENCES = ("agent",)
 GROUNDING_QUERY_OPERATIONS = ("list", "filter", "rank", "select", "answer")
 GROUNDING_QUERY_ORDERS = ("ascending", "descending")
 GROUNDING_QUERY_TIE_POLICIES = ("clarify", "display")
+# Canonical answer-field vocabulary the deterministic executor recognizes. The LLM's output is
+# canonicalized to this set BEFORE dispatch (see _ensure_canonical_answer_fields): conservative
+# aliases repair near-misses (plural/synonym); ordinal forms `<first..fifth>_<closest|farthest>`
+# are matched by pattern; anything else fails closed. Substrate-independent (shared vocabulary).
+GROUNDING_QUERY_ANSWER_FIELDS = ("distance", "ranked_doors", "closest", "farthest", "exists", "target")
+_ANSWER_FIELD_ALIASES = {
+    "distances": "distance",
+    "nearest": "closest",
+    "furthest": "farthest",
+    "ranking": "ranked_doors",
+    "ranked_list": "ranked_doors",
+}
+_ORDINAL_ANSWER_FIELD_RE = re.compile(r"^(first|second|third|fourth|fifth)_(closest|farthest)$")
 OPERATOR_STATUS_QUERIES = (
     "status",
     "scene",
@@ -201,6 +223,7 @@ REQUEST_TIE_POLICIES = ("clarify", "display_ties", "fail")
 READINESS_NODE_STATUSES = (
     "executable",
     "needs_clarification",
+    "needs_evidence",
     "needs_authorization",
     "validation_required",
     "claim_contract_failed",
@@ -222,6 +245,15 @@ READINESS_NEXT_ACTIONS = (
     "refresh_claims",
     "update_memory",
     "refuse",
+)
+CLARIFICATION_REQUEST_TYPES = (
+    "missing_field",
+    "candidate_choice",
+    "needs_evidence",
+)
+CLARIFICATION_EVIDENCE_SCOPES = (
+    "visible_only",
+    "search_allowed",
 )
 ARBITRATION_DECISION_TYPES = (
     "substitute",
@@ -351,6 +383,29 @@ def _ensure_str_list(value: Any, label: str) -> list[str]:
     return result
 
 
+def _ensure_canonical_answer_fields(value: Any, label: str) -> list[str]:
+    """Normalize-then-validate the LLM's answer_fields to the canonical vocabulary.
+
+    Conservative aliases repair near-misses (e.g. "distances" -> "distance"); ordinal forms
+    (`<first..fifth>_<closest|farthest>`) pass through; an unrecognized value fails CLOSED with
+    SchemaValidationError (which the LLM compiler turns into a regex fallback, else an honest
+    "I didn't understand"). This is the single chokepoint, so both the LLM and regex paths emit
+    canonical answer_fields and the deterministic executor sees one vocabulary.
+    """
+    result: list[str] = []
+    for idx, item in enumerate(_ensure_str_list(value, label)):
+        key = item.strip().lower()
+        canonical = _ANSWER_FIELD_ALIASES.get(key, key)
+        if canonical in GROUNDING_QUERY_ANSWER_FIELDS or _ORDINAL_ANSWER_FIELD_RE.match(canonical):
+            result.append(canonical)
+        else:
+            raise SchemaValidationError(
+                f"{label}[{idx}]: unknown answer field {item!r}; canonical values are "
+                f"{GROUNDING_QUERY_ANSWER_FIELDS} or <first..fifth>_<closest|farthest>"
+            )
+    return result
+
+
 def _ensure_dict(value: Any, label: str) -> dict[str, Any]:
     mapping = _ensure_mapping(value, label)
     return dict(mapping)
@@ -435,20 +490,30 @@ def _ensure_optional_int(value: Any, label: str) -> int | None:
     return value
 
 
-def _ensure_operator_target(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_operator_target(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     target = _ensure_dict(value, label)
     _check_keys(target, ("color", "object_type"), label)
     obj_type = _ensure_optional_str(target.get("object_type"), f"{label}.object_type")
-    _validate_object_type(obj_type, label)
+    _validate_object_type(obj_type, label, object_types)
     return {
         "color": _ensure_optional_str_enum(target.get("color"), OPERATOR_COLORS, f"{label}.color"),
         "object_type": obj_type,
     }
 
 
-def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_operator_knowledge_update(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     update = _ensure_dict(value, label)
@@ -456,7 +521,11 @@ def _ensure_operator_knowledge_update(value: Any, label: str) -> dict[str, Any] 
     raw_delivery_target = update.get("delivery_target")
     if raw_delivery_target is None:
         return {"delivery_target": None}
-    delivery_target = _ensure_operator_target(raw_delivery_target, f"{label}.delivery_target")
+    delivery_target = _ensure_operator_target(
+        raw_delivery_target,
+        f"{label}.delivery_target",
+        object_types=object_types,
+    )
     if delivery_target.get("color") is None or delivery_target.get("object_type") is None:
         raise SchemaValidationError(f"{label}.delivery_target must be fully specified")
     return {"delivery_target": delivery_target}
@@ -637,7 +706,12 @@ def _migrate_exclude_color(selector: dict[str, Any]) -> None:
         selector["exclude_colors"] = []
 
 
-def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_target_selector(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     selector = _ensure_dict(value, label)
@@ -663,7 +737,7 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             validated_exclude.append(validated)
 
     sel_obj_type = _ensure_optional_str(selector.get("object_type"), f"{label}.object_type")
-    _validate_object_type(sel_obj_type, label)
+    _validate_object_type(sel_obj_type, label, object_types)
     result = {
         "object_type": sel_obj_type,
         "color": _ensure_optional_str_enum(
@@ -687,11 +761,16 @@ def _ensure_target_selector(value: Any, label: str) -> dict[str, Any] | None:
             f"{label}.distance_reference",
         ),
     }
-    _validate_object_type(result["object_type"], label)
+    _validate_object_type(result["object_type"], label, object_types)
     return result
 
 
-def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | None:
+def _ensure_grounding_query_plan(
+    value: Any,
+    label: str,
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any] | None:
     if value is None:
         return None
     plan = _ensure_dict(value, label)
@@ -732,7 +811,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
         primitive_handle = _ensure_str(primitive_handle, f"{label}.primitive_handle")
 
     plan_obj_type = _ensure_optional_str(plan.get("object_type"), f"{label}.object_type")
-    _validate_object_type(plan_obj_type, label)
+    _validate_object_type(plan_obj_type, label, object_types)
     result = {
         "object_type": plan_obj_type,
         "operation": _ensure_optional_str_enum(
@@ -776,7 +855,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             GROUNDING_QUERY_TIE_POLICIES,
             f"{label}.tie_policy",
         ),
-        "answer_fields": _ensure_str_list(
+        "answer_fields": _ensure_canonical_answer_fields(
             plan.get("answer_fields"),
             f"{label}.answer_fields",
         ),
@@ -789,7 +868,7 @@ def _ensure_grounding_query_plan(value: Any, label: str) -> dict[str, Any] | Non
             f"{label}.preserved_constraints",
         ),
     }
-    _validate_object_type(result["object_type"], label)
+    _validate_object_type(result["object_type"], label, object_types)
     if result["operation"] is None:
         raise SchemaValidationError(f"{label}.operation must not be null")
     ordinal = result["ordinal"]
@@ -851,8 +930,17 @@ class TargetSelector:
     distance_reference: str | None = None
 
     @classmethod
-    def from_dict(cls, data: Any) -> TargetSelector:
-        selector = _ensure_target_selector(data, "TargetSelector")
+    def from_dict(
+        cls,
+        data: Any,
+        *,
+        object_types: tuple[str, ...] | list[str] | None = None,
+    ) -> TargetSelector:
+        selector = _ensure_target_selector(
+            data,
+            "TargetSelector",
+            object_types=object_types,
+        )
         if selector is None:
             raise SchemaValidationError("TargetSelector must not be null")
         return cls(**selector)
@@ -1523,6 +1611,72 @@ class PrimitiveDefinitionRequest:
 
 
 @dataclass
+class ClarificationRequest:
+    """Typed operator request for missing information or missing evidence."""
+
+    request_type: str
+    prompt: str
+    reason: str
+    resume_kind: str
+    evidence_scope: str | None = None
+    target: dict[str, Any] = field(default_factory=dict)
+    options: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "ClarificationRequest":
+        mapping = _ensure_mapping(data, "ClarificationRequest")
+        request_type = _ensure_str(
+            mapping.get("request_type"),
+            "ClarificationRequest.request_type",
+        )
+        if request_type not in CLARIFICATION_REQUEST_TYPES:
+            raise SchemaValidationError(
+                "ClarificationRequest.request_type must be one of: "
+                + ", ".join(CLARIFICATION_REQUEST_TYPES)
+            )
+        evidence_scope = _ensure_optional_str_enum(
+            mapping.get("evidence_scope"),
+            CLARIFICATION_EVIDENCE_SCOPES,
+            "ClarificationRequest.evidence_scope",
+        )
+        return cls(
+            request_type=request_type,
+            prompt=_ensure_str(mapping.get("prompt"), "ClarificationRequest.prompt"),
+            reason=_ensure_str(mapping.get("reason"), "ClarificationRequest.reason"),
+            resume_kind=_ensure_str(
+                mapping.get("resume_kind"),
+                "ClarificationRequest.resume_kind",
+            ),
+            evidence_scope=evidence_scope,
+            target=_ensure_dict(
+                mapping.get("target", {}),
+                "ClarificationRequest.target",
+            ),
+            options=_ensure_str_list(
+                mapping.get("options", []),
+                "ClarificationRequest.options",
+            ),
+            provenance=_ensure_dict(
+                mapping.get("provenance", {}),
+                "ClarificationRequest.provenance",
+            ),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_type": self.request_type,
+            "prompt": self.prompt,
+            "reason": self.reason,
+            "resume_kind": self.resume_kind,
+            "evidence_scope": self.evidence_scope,
+            "target": dict(self.target),
+            "options": list(self.options),
+            "provenance": dict(self.provenance),
+        }
+
+
+@dataclass
 class OperatorIntent:
     intent_type: str
     canonical_instruction: str | None = None
@@ -1589,7 +1743,12 @@ class OperatorIntent:
         return self._KNOWLEDGE_TYPE_MAP.get(self.intent_type, "control")
 
     @classmethod
-    def from_dict(cls, data: Any) -> OperatorIntent:
+    def from_dict(
+        cls,
+        data: Any,
+        *,
+        object_types: tuple[str, ...] | list[str] | None = None,
+    ) -> OperatorIntent:
         mapping = _ensure_mapping(data, "OperatorIntent")
         intent_type = _ensure_str(mapping.get("intent_type"), "OperatorIntent.intent_type")
         if intent_type not in OPERATOR_INTENT_TYPES:
@@ -1598,10 +1757,15 @@ class OperatorIntent:
                 + ", ".join(OPERATOR_INTENT_TYPES)
             )
 
-        target = _ensure_operator_target(mapping.get("target"), "OperatorIntent.target")
+        target = _ensure_operator_target(
+            mapping.get("target"),
+            "OperatorIntent.target",
+            object_types=object_types,
+        )
         knowledge_update = _ensure_operator_knowledge_update(
             mapping.get("knowledge_update"),
             "OperatorIntent.knowledge_update",
+            object_types=object_types,
         )
         task_type = _ensure_optional_str_enum(
             mapping.get("task_type"),
@@ -1636,10 +1800,12 @@ class OperatorIntent:
         target_selector = _ensure_target_selector(
             mapping.get("target_selector"),
             "OperatorIntent.target_selector",
+            object_types=object_types,
         )
         grounding_query_plan = _ensure_grounding_query_plan(
             mapping.get("grounding_query_plan"),
             "OperatorIntent.grounding_query_plan",
+            object_types=object_types,
         )
         primitive_definition = (
             PrimitiveDefinitionRequest.from_dict(mapping.get("primitive_definition"))
@@ -1814,6 +1980,29 @@ class OperatorIntent:
                 raise SchemaValidationError("motor_command requires action_name")
             if self.repeat_count is not None and self.repeat_count < 1:
                 raise SchemaValidationError("motor_command repeat_count must be >= 1")
+        elif self.intent_type == "conditional_sense_motor":
+            if self.capability_status == "needs_clarification":
+                return
+            has_target = (
+                isinstance(self.target, dict)
+                and self.target.get("color") is not None
+                and self.target.get("object_type") is not None
+            )
+            if not has_target:
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires a color and object_type target"
+                )
+            if not self.action_name:
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires action_name"
+                )
+            if (
+                self.steering_directive is None
+                or self.steering_directive.stopping_rule != "first_match"
+            ):
+                raise SchemaValidationError(
+                    "conditional_sense_motor requires stopping_rule=first_match"
+                )
         elif self.intent_type == "mission_contract":
             if not self.mission_steps or len(self.mission_steps) < 2:
                 raise SchemaValidationError(
@@ -1911,6 +2100,10 @@ class WorldModelSample:
     grid_objects: list[dict[str, Any]] = field(default_factory=list)
     occupancy_grid: list[list[bool]] = field(default_factory=list)
     passable_positions: set[tuple[int, int]] = field(default_factory=set)
+    observation_model: str = "unknown"
+    visible_cells: set[tuple[int, int]] = field(default_factory=set)
+    unseen_cells: set[tuple[int, int]] = field(default_factory=set)
+    view_to_global: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
     agent_pose: dict[str, Any] | None = None
     target_visible: bool = False
     target_location: tuple[int, int] | None = None
@@ -1923,6 +2116,9 @@ class WorldModelSample:
             "direction": self.direction,
             "step_count": self.step_count,
             "grid_size": self.grid_size,
+            "observation_model": self.observation_model,
+            "visible_cells": sorted(self.visible_cells),
+            "unseen_cell_count": len(self.unseen_cells),
             "agent_pose": self.agent_pose,
             "target_visible": self.target_visible,
             "target_location": self.target_location,
@@ -1961,6 +2157,9 @@ class SceneModel:
     seed: int | None = None
     step_count: int = 0
     agent_z: float | None = None  # absent on 2D substrates; set on 3D ones
+    observation_model: str = "unknown"
+    visible_cells: list[tuple[int, int]] = field(default_factory=list)
+    unseen_cells: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def agent_coord(self) -> tuple[float, ...]:
@@ -2023,6 +2222,9 @@ class SceneModel:
             env_id=env_id,
             seed=seed,
             step_count=sample.step_count,
+            observation_model=sample.observation_model,
+            visible_cells=sorted(sample.visible_cells),
+            unseen_cells=sorted(sample.unseen_cells),
         )
 
 
@@ -2317,6 +2519,11 @@ class StationActiveClaims:
     source: str = "grounding"
     authority: str = "runtime"
 
+    @property
+    def ranked_objects(self) -> list[GroundedObjectEntry]:
+        """Object-generic view over the legacy MiniGrid field name."""
+        return self.ranked_scene_doors
+
     def is_valid_for(
         self,
         scene: SceneModel,
@@ -2337,20 +2544,32 @@ class StationActiveClaims:
             return self.ranked_scene_doors[rank], rank
         return None, None
 
-    def other_doors(self) -> list[GroundedObjectEntry]:
+    def other_objects(self) -> list[GroundedObjectEntry]:
         t = self.last_grounded_target
         return [
-            d for d in self.ranked_scene_doors
-            if not (d.x == t.x and d.y == t.y)
+            obj for obj in self.ranked_objects
+            if not (obj.x == t.x and obj.y == t.y)
         ]
 
+    def other_doors(self) -> list[GroundedObjectEntry]:
+        """Backward-compatible alias for older MiniGrid claim consumers."""
+        return self.other_objects()
+
     def compact_summary(self) -> dict[str, Any]:
+        ranked_objects = [
+            f"{obj.color} {obj.object_type}@{obj.distance}"
+            for obj in self.ranked_objects
+        ]
         return {
+            "object_type": self.last_grounded_target.object_type,
             "last_grounded_target": (
-                f"{self.last_grounded_target.color} door @ distance {self.last_grounded_target.distance}"
+                f"{self.last_grounded_target.color} "
+                f"{self.last_grounded_target.object_type} @ distance "
+                f"{self.last_grounded_target.distance}"
             ),
+            "ranked_objects": ranked_objects,
             "ranked_doors": [
-                f"{d.color}@{d.distance}" for d in self.ranked_scene_doors
+                f"{obj.color}@{obj.distance}" for obj in self.ranked_scene_doors
             ],
             "last_rank": self.last_grounded_rank,
             "environment_fingerprint": self.environment_fingerprint,
@@ -2489,6 +2708,12 @@ class ClaimRecord:
             raise SchemaValidationError(
                 f"ClaimRecord.freshness must be one of: {', '.join(CLAIM_FRESHNESS)}"
             )
+        if self.valid_until is not None:
+            if isinstance(self.valid_until, bool) or not isinstance(
+                self.valid_until, (int, float)
+            ):
+                raise SchemaValidationError("ClaimRecord.valid_until must be numeric or null")
+            self.valid_until = float(self.valid_until)
         if not isinstance(self.confidence, (int, float)) or isinstance(self.confidence, bool):
             raise SchemaValidationError("ClaimRecord.confidence must be numeric")
         if not 0.0 <= float(self.confidence) <= 1.0:
@@ -2498,6 +2723,15 @@ class ClaimRecord:
     @classmethod
     def from_dict(cls, data: Any) -> "ClaimRecord":
         mapping = _ensure_mapping(data, "ClaimRecord")
+        valid_until_raw = mapping.get("valid_until")
+        if valid_until_raw is not None:
+            if isinstance(valid_until_raw, bool) or not isinstance(
+                valid_until_raw, (int, float)
+            ):
+                raise SchemaValidationError("ClaimRecord.valid_until must be numeric or null")
+            valid_until = float(valid_until_raw)
+        else:
+            valid_until = None
         return cls(
             claim_id=_ensure_str(mapping.get("claim_id"), "ClaimRecord.claim_id"),
             key=_ensure_str(mapping.get("key"), "ClaimRecord.key"),
@@ -2508,6 +2742,7 @@ class ClaimRecord:
             authority=_ensure_str(mapping.get("authority"), "ClaimRecord.authority"),
             source=_ensure_str(mapping.get("source"), "ClaimRecord.source"),
             confidence=float(mapping.get("confidence", 1.0)),
+            valid_until=valid_until,
             provenance=_ensure_dict(mapping.get("provenance", {}), "ClaimRecord.provenance"),
             freshness=_ensure_str(mapping.get("freshness", "current"), "ClaimRecord.freshness"),
             invalidation=_ensure_dict(mapping.get("invalidation", {}), "ClaimRecord.invalidation"),
@@ -2524,6 +2759,7 @@ class ClaimRecord:
             "authority": self.authority,
             "source": self.source,
             "confidence": self.confidence,
+            "valid_until": self.valid_until,
             "provenance": dict(self.provenance),
             "freshness": self.freshness,
             "invalidation": dict(self.invalidation),
@@ -2655,19 +2891,33 @@ class ExecutionContext:
 
 @dataclass
 class MissionContract:
-    """L4 goal — an ordered sequence of tasks with explicit success conditions.
+    """L4 goal — approved tasks/procedure with explicit success conditions.
 
     Distinct from sequence_instruction (L2 procedure): MissionContract carries
-    abort-on-failure semantics and is the entry point for the Phase 9 repair loop.
+    abort-on-failure semantics and may carry the validated ProcedureRecipe and
+    parameters that an ExecutionTicket authorizes.
     """
 
     mission_id: str
     description: str
-    task_sequence: list[str]          # ordered raw task utterances
+    task_sequence: list[str]          # ordered raw task utterances; one for a conditional mission
     success_condition: str = "all_complete"
     abort_on_failure: bool = True
     risk_tier: str = "low"
     cadence: str | None = None
+    procedure: ProcedureRecipe | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    required_capabilities: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.mission_id:
+            raise SchemaValidationError("MissionContract requires mission_id")
+        if not self.task_sequence:
+            raise SchemaValidationError("MissionContract requires at least one task")
+        if self.procedure is not None and not self.procedure.steps:
+            raise SchemaValidationError("MissionContract procedure requires at least one step")
+        if self.procedure is not None and not self.procedure.validated:
+            raise SchemaValidationError("MissionContract procedure must be validated")
 
 
 @dataclass
@@ -2755,6 +3005,7 @@ class ExecutionTicket:
     mission_id: str | None = None
     parent_request_id: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    mission_contract: MissionContract | None = None
 
     def __post_init__(self) -> None:
         if self.readiness_graph.request_id != self.request_id:
@@ -2765,6 +3016,24 @@ class ExecutionTicket:
             raise SchemaValidationError("ExecutionTicket requires executable readiness graph")
         if self.readiness_graph.next_action != "execute_task":
             raise SchemaValidationError("ExecutionTicket requires next_action=execute_task")
+        if self.mission_contract is not None:
+            contract = self.mission_contract
+            if self.mission_id != contract.mission_id:
+                raise SchemaValidationError(
+                    "ExecutionTicket mission_id must match MissionContract"
+                )
+            if contract.procedure is None:
+                raise SchemaValidationError(
+                    "ExecutionTicket MissionContract requires an approved procedure"
+                )
+            if self.task_type != contract.procedure.task_type:
+                raise SchemaValidationError(
+                    "ExecutionTicket task_type must match MissionContract procedure"
+                )
+            if self.params != contract.params:
+                raise SchemaValidationError(
+                    "ExecutionTicket params must match MissionContract params"
+                )
 
 
 @dataclass
@@ -3130,12 +3399,19 @@ def memory_updates_json_schema() -> dict[str, Any]:
     }
 
 
-def operator_intent_json_schema() -> dict[str, Any]:
+def operator_intent_json_schema(
+    *,
+    object_types: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, Any]:
+    schema_object_types = list(
+        object_types if object_types is not None else get_registered_object_types()
+    )
+    example_object_type = schema_object_types[0] if schema_object_types else "object"
     target_schema = {
         "type": ["object", "null"],
         "properties": {
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
         },
         "required": ["color", "object_type"],
         "additionalProperties": False,
@@ -3143,7 +3419,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     target_selector_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
             "color": {"type": ["string", "null"], "enum": [*OPERATOR_COLORS, None]},
             "exclude_colors": {
                 "type": "array",
@@ -3173,7 +3449,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
     grounding_query_plan_schema = {
         "type": ["object", "null"],
         "properties": {
-            "object_type": {"type": ["string", "null"], "enum": [*get_registered_object_types(), None]},
+            "object_type": {"type": ["string", "null"], "enum": [*schema_object_types, None]},
             "operation": {"type": ["string", "null"], "enum": [*GROUNDING_QUERY_OPERATIONS, None]},
             "primitive_handle": {"type": ["string", "null"]},
             "metric": {
@@ -3353,7 +3629,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
                         "type": "string",
                         "description": (
                             "The property being ranked/selected (e.g. 'distance', 'temperature'). "
-                            "Use 'distance' for door-distance queries."
+                            f"Use 'distance' for {example_object_type}-distance queries."
                         ),
                     },
                     "direction": {
@@ -3379,7 +3655,7 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "description": (
                     "Structured distillation of the operator's selection intent. "
                     "Set this whenever the request involves picking by a ranked attribute "
-                    "(farthest door, second closest, hottest room, etc.). "
+                    f"(farthest {example_object_type}, second closest, hottest room, etc.). "
                     "Null for non-ranking intents."
                 ),
             },
@@ -3400,7 +3676,8 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "type": ["string", "null"],
                 "description": (
                     "For concept_teach: the full instruction the label expands to "
-                    "(e.g. 'go to the red door'). Null for concept_recall."
+                    f"(e.g. 'go to the red {example_object_type}'). "
+                    "Null for concept_recall."
                 ),
             },
             "concept_steps": {
@@ -3416,14 +3693,17 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "items": {"type": "string"},
                 "description": (
                     "For sequence_instruction: ordered list of raw task utterances to "
-                    "execute sequentially (e.g. ['go to the red door', 'go to the green door']). "
+                    "execute sequentially (e.g. "
+                    f"['go to the red {example_object_type}', "
+                    f"'go to the green {example_object_type}']). "
                     "Null for all other intents."
                 ),
             },
             "action_name": {
                 "type": ["string", "null"],
                 "description": (
-                    "For motor_command: the low-level action primitive key to authorize "
+                    "For motor_command or conditional_sense_motor: the low-level action "
+                    "primitive key to authorize "
                     "(e.g. 'move_forward', 'turn_right', 'turn_left'). "
                     "Null for all other intents."
                 ),
@@ -3442,7 +3722,9 @@ def operator_intent_json_schema() -> dict[str, Any]:
                 "minItems": 2,
                 "description": (
                     "For mission_contract: ordered list of raw task utterances constituting "
-                    "the mission (e.g. ['go to the red door', 'go to the green door']). "
+                    "the mission (e.g. "
+                    f"['go to the red {example_object_type}', "
+                    f"'go to the green {example_object_type}']). "
                     "Requires at least 2 steps. Null for all other intents."
                 ),
             },

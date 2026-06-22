@@ -24,6 +24,8 @@ Checks:
   schema_roundtrip_sequence_instruction  — OperatorIntent.from_dict round-trips correctly
   schema_validates_steps_required        — < 2 steps raises SchemaValidationError
   sequence_instruction_routes_to_execute — command_from_operator_intent returns sequence_execute
+  sequence_instruction_motor_steps_route_to_motor_sequence — LLM-shaped motor steps don't
+                                           fall into task-sequence execution
   handle_utterance_raw_seq_runs          — handle_utterance('go to red door then green door')
                                            returns PROCEDURE COMPLETE
   handle_utterance_last_result_set       — last_result is populated after sequence execution
@@ -145,6 +147,25 @@ def main() -> int:
             isinstance(cmd, ApprovedCommand)
             and cmd.kind == "sequence_execute"
             and cmd.payload.get("steps") == ["go to the red door", "go to the green door"]
+        )
+        motor_cmd = sess.turn_orchestrator.dispatch(
+            sess,
+            OperatorIntent(
+                intent_type="sequence_instruction",
+                utterance_steps=["turn left twice", "go forward once"],
+                capability_status="executable",
+                confidence=1.0,
+                reason="LLM-shaped motor sequence emitted as sequence_instruction.",
+            ),
+            "can you turn left twice and go forward once",
+        )
+        metrics["sequence_instruction_motor_steps_route_to_motor_sequence"] = (
+            isinstance(motor_cmd, ApprovedCommand)
+            and motor_cmd.kind == "motor_sequence_execute"
+            and motor_cmd.payload.get("sequence") == [
+                {"action": "turn_left", "count": 2},
+                {"action": "move_forward", "count": 1},
+            ]
         )
 
     # ── End-to-end: handle_utterance with raw sequential utterance ────────────

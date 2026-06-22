@@ -53,9 +53,11 @@ class CapabilityMatchResult:
             return ""
         if self.verdict == VERDICT_MISSING_SKILLS:
             handles = ", ".join(self.missing)
+            # Canonical deterministic refusal — matches the `missing_skills` verdict and is
+            # the single operator-facing wording used by both the regex/smoke and LLM paths
+            # (the arbitrator only decides to refuse; this owns the text).
             return (
-                f"MISSING CAPABILITIES\n"
-                f"required={handles}\n"
+                f"MISSING SKILLS: {handles}\n"
                 f"I do not have these capabilities yet. "
                 f"Use 'what can you do' to see what is available."
             )

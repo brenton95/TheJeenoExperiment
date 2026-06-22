@@ -170,14 +170,7 @@ class MiniGridSense:
 
     def execute_plan(self, observation, plan):
         self._validate_plan(plan)
-        sample = WorldModelSample(
-            mission=observation.raw.get("mission"),
-            direction=int(observation.raw.get("direction"))
-            if observation.raw.get("direction") is not None
-            else None,
-            step_count=observation.step_count,
-            raw_image=observation.raw.get("image"),
-        )
+        sample = self._sample_from_observation(observation)
 
         for step in plan:
             if step.name == "parse_grid_objects":
@@ -240,14 +233,7 @@ class MiniGridSense:
         Uses the same parse_grid_objects primitive as task sense — no separate
         sensing path. Stores the result in memory.scene_model.
         """
-        sample = WorldModelSample(
-            mission=observation.raw.get("mission"),
-            direction=int(observation.raw.get("direction", 0))
-            if observation.raw.get("direction") is not None
-            else None,
-            step_count=observation.step_count,
-            raw_image=observation.raw.get("image"),
-        )
+        sample = self._sample_from_observation(observation)
         self._parse_grid_objects(sample)
         self._get_agent_pose(sample)
         model = SceneModel.from_world_model_sample(
@@ -288,39 +274,128 @@ class MiniGridSense:
         if sample.grid_size is None:
             self._parse_grid_objects(sample)
 
+    def _sample_from_observation(self, observation) -> WorldModelSample:
+        raw = observation.raw
+        grid_size = self._tuple2(raw.get("_jeenom_grid_size"))
+        visible_cells, view_to_global = self._visibility_from_raw(raw)
+        unseen_cells: set[tuple[int, int]] = set()
+        if grid_size is not None and visible_cells:
+            unseen_cells = {
+                (x, y)
+                for x in range(grid_size[0])
+                for y in range(grid_size[1])
+            } - visible_cells
+        agent_pose = self._agent_pose_from_raw(raw)
+        return WorldModelSample(
+            mission=raw.get("mission"),
+            direction=int(raw.get("direction"))
+            if raw.get("direction") is not None
+            else None,
+            step_count=observation.step_count,
+            raw_image=raw.get("image"),
+            grid_size=grid_size,
+            observation_model=str(raw.get("_jeenom_observation_model") or "unknown"),
+            visible_cells=visible_cells,
+            unseen_cells=unseen_cells,
+            view_to_global=view_to_global,
+            agent_pose=agent_pose,
+        )
+
+    @staticmethod
+    def _tuple2(value) -> tuple[int, int] | None:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return int(value[0]), int(value[1])
+        return None
+
+    @staticmethod
+    def _agent_pose_from_raw(raw) -> dict[str, int] | None:
+        pos = raw.get("_jeenom_agent_pos")
+        if not (isinstance(pos, (list, tuple)) and len(pos) == 2):
+            return None
+        direction = raw.get("_jeenom_agent_dir", raw.get("direction", 0))
+        return {"x": int(pos[0]), "y": int(pos[1]), "dir": int(direction)}
+
+    @staticmethod
+    def _visibility_from_raw(raw) -> tuple[set[tuple[int, int]], dict[tuple[int, int], tuple[int, int]]]:
+        visible_cells: set[tuple[int, int]] = set()
+        view_to_global: dict[tuple[int, int], tuple[int, int]] = {}
+        records = raw.get("_jeenom_visible_cells") or []
+        if not isinstance(records, list):
+            return visible_cells, view_to_global
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            try:
+                view = (int(record["view_x"]), int(record["view_y"]))
+                global_cell = (int(record["x"]), int(record["y"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            view_to_global[view] = global_cell
+            visible_cells.add(global_cell)
+        return visible_cells, view_to_global
+
+    def _observed_cells(self, sample: WorldModelSample):
+        image = sample.raw_image
+        if image is None:
+            raise RuntimeError("MiniGridSense requires an observation image for parsing.")
+        if sample.view_to_global:
+            items = sorted(sample.view_to_global.items(), key=lambda item: item[1])
+        else:
+            width, height = image.shape[0], image.shape[1]
+            items = [
+                ((x, y), (x, y))
+                for x in range(width)
+                for y in range(height)
+            ]
+            if not sample.visible_cells:
+                sample.visible_cells = {global_cell for _, global_cell in items}
+        for (view_x, view_y), (global_x, global_y) in items:
+            if not (0 <= view_x < image.shape[0] and 0 <= view_y < image.shape[1]):
+                continue
+            object_idx, color_idx, state_idx = [int(v) for v in image[view_x][view_y]]
+            yield {
+                "view_x": view_x,
+                "view_y": view_y,
+                "x": global_x,
+                "y": global_y,
+                "object_type": _IDX_TO_OBJECT.get(object_idx, "unknown"),
+                "color": _IDX_TO_COLOR.get(color_idx),
+                "state": state_idx,
+            }
+
     def _parse_grid_objects(self, sample: WorldModelSample) -> None:
         image = sample.raw_image
         if image is None:
             raise RuntimeError("MiniGridSense requires an observation image for parsing.")
 
-        width, height = image.shape[0], image.shape[1]
-        sample.grid_size = (width, height)
+        width, height = sample.grid_size or (image.shape[0], image.shape[1])
+        sample.grid_size = (int(width), int(height))
         sample.grid_objects = []
-        sample.agent_pose = None
+        metadata_agent_pose = sample.agent_pose
+        sample.agent_pose = metadata_agent_pose
 
-        for x in range(width):
-            for y in range(height):
-                object_idx, color_idx, state_idx = [int(v) for v in image[x][y]]
-                object_type = _IDX_TO_OBJECT.get(object_idx, "unknown")
-                color = _IDX_TO_COLOR.get(color_idx)
-                state = state_idx
+        for cell in self._observed_cells(sample):
+            object_type = cell["object_type"]
+            color = cell["color"]
+            state = cell["state"]
 
-                if object_type == "agent":
-                    sample.agent_pose = {"x": x, "y": y, "dir": state}
-                    continue
+            if object_type == "agent":
+                sample.agent_pose = {"x": cell["x"], "y": cell["y"], "dir": state}
+                continue
 
-                if object_type in {"empty", "unseen"}:
-                    continue
+            if object_type in {"empty", "unseen"}:
+                continue
 
-                sample.grid_objects.append(
-                    {
-                        "x": x,
-                        "y": y,
-                        "type": object_type,
-                        "color": color,
-                        "state": state,
-                    }
-                )
+            sample.grid_objects.append(
+                {
+                    "x": cell["x"],
+                    "y": cell["y"],
+                    "type": object_type,
+                    "color": color,
+                    "state": state,
+                    "visible": True,
+                }
+            )
 
     def _build_occupancy_grid(self, sample: WorldModelSample) -> None:
         self._ensure_parsed_grid(sample)
@@ -331,18 +406,20 @@ class MiniGridSense:
         occupancy_grid = [[False for _ in range(width)] for _ in range(height)]
         passable_positions: set[tuple[int, int]] = set()
 
-        for x in range(width):
-            for y in range(height):
-                object_idx, _, state_idx = [int(v) for v in sample.raw_image[x][y]]
-                object_type = _IDX_TO_OBJECT.get(object_idx, "unknown")
+        for cell in self._observed_cells(sample):
+            x = int(cell["x"])
+            y = int(cell["y"])
+            if not (0 <= x < width and 0 <= y < height):
+                continue
+            object_type = cell["object_type"]
+            state = int(cell["state"])
+            passable = object_type in {"empty", "floor", "goal", "agent"}
+            if object_type in _OPEN_STATE_PASSABLE and state == 0:
+                passable = True
 
-                passable = object_type in {"empty", "floor", "goal", "agent"}
-                if object_type in _OPEN_STATE_PASSABLE and int(state_idx) == 0:
-                    passable = True
-
-                occupancy_grid[y][x] = passable
-                if passable:
-                    passable_positions.add((x, y))
+            occupancy_grid[y][x] = passable
+            if passable:
+                passable_positions.add((x, y))
 
         sample.occupancy_grid = occupancy_grid
         sample.passable_positions = passable_positions

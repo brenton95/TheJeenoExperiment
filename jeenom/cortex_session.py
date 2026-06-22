@@ -42,6 +42,7 @@ class CortexSession:
         active_claims: StationActiveClaims | None = None,
         claims_valid: bool = False,
         environment_identity: EnvironmentIdentity | None = None,
+        evidence_state: dict[str, Any] | None = None,
     ) -> tuple[RequestPlan, ReadinessGraph]:
         """Build and evaluate a request plan for an intent."""
         active_summary = (
@@ -64,6 +65,7 @@ class CortexSession:
             claims_valid=claims_valid,
             environment_identity=environment_identity,
             risk_policy=self.risk_policy,
+            evidence_state=evidence_state,
         )
         return plan, graph
 
@@ -74,6 +76,7 @@ class CortexSession:
         active_claims: StationActiveClaims | None = None,
         claims_valid: bool = False,
         environment_identity: EnvironmentIdentity | None = None,
+        evidence_state: dict[str, Any] | None = None,
     ) -> ReadinessGraph:
         """Evaluate an already-built plan (e.g. after repair, cache reuse, or manual construction)."""
         return evaluate_request_plan(
@@ -83,4 +86,5 @@ class CortexSession:
             claims_valid=claims_valid,
             environment_identity=environment_identity,
             risk_policy=self.risk_policy,
+            evidence_state=evidence_state,
         )

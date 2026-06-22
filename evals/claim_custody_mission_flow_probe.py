@@ -110,13 +110,16 @@ def _run_static_checks(metrics: dict[str, bool], details: dict[str, Any]) -> Non
     flow = _source("PlanOfAction/flow_of_control.mmd")
     docs_blob = "\n".join([task_plan, blueprint, workflow, flow])
     metrics["planofaction_records_mission_flow_complete_before_phase12"] = (
-        "Phase 12D is complete" in task_plan
-        and "Current phase: **Phase 13" in task_plan
-        and "Phase 12 is complete for MiniGrid ORPI v0" in task_plan
+        "| 12D | complete |" in task_plan
+        and "Current phase: **Phase 13B" in task_plan
+        and "### Phase 12 And 12D - ORPI v0.1" in task_plan
+        and "Status: **complete for MiniGrid**." in task_plan
     )
     metrics["task_plan_phase11_numbering_not_corrupted"] = (
         "claims and pri\n- Decide whether repo liposuction" not in task_plan
-        and "primitive availability.\n7. Cortex issues" in task_plan
+        and task_plan.find("### Phase 11 - Mission Flow And Architecture Surgery")
+        < task_plan.find("### Phase 12 And 12D - ORPI v0.1")
+        < task_plan.find("### Phase 13A - Steering Core")
     )
     metrics["planofaction_documents_share_mission_flow"] = all(
         token in docs_blob

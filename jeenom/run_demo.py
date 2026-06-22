@@ -33,8 +33,15 @@ def build_env(env_id: str, render_mode: str | None):
     kwargs = {}
     if render_mode != "none":
         kwargs["render_mode"] = render_mode
-    env = gym.make(env_id, **kwargs)
-    return FullyObsWrapper(env)
+    return gym.make(env_id, **kwargs)
+
+
+def build_full_env(env_id: str, render_mode: str | None):
+    ensure_custom_minigrid_envs_registered()
+    kwargs = {}
+    if render_mode != "none":
+        kwargs["render_mode"] = render_mode
+    return FullyObsWrapper(gym.make(env_id, **kwargs))
 
 
 def run_motor_sequence(
@@ -278,6 +285,30 @@ def prewarm_jit_cache(
             ExecutionContext(active_skill="navigate_to_object", params=dict(navigate_params)),
         ),
     ]
+    if "act_until_evidence" in procedure_recipe.steps:
+        sense_warmups = [
+            (
+                "act_until_evidence:idle",
+                EvidenceFrame(
+                    needs=["object_location", "agent_pose"],
+                    context=dict(base_params),
+                    active_step="act_until_evidence",
+                ),
+                ExecutionContext(active_skill="idle", params=dict(base_params)),
+            ),
+            (
+                "act_until_evidence:action",
+                EvidenceFrame(
+                    needs=["object_location", "agent_pose"],
+                    context=dict(base_params),
+                    active_step="act_until_evidence",
+                ),
+                ExecutionContext(
+                    active_skill=str(base_params.get("action_name") or "move_forward"),
+                    params=dict(base_params),
+                ),
+            ),
+        ]
 
     seen_sense_labels: set[str] = set()
     for label, evidence_frame, execution_context in sense_warmups:
@@ -332,6 +363,21 @@ def prewarm_jit_cache(
             ),
         ),
     ]
+    if "act_until_evidence" in procedure_recipe.steps:
+        action_name = str(base_params.get("action_name") or "move_forward")
+        skill_warmups = [
+            (
+                action_name,
+                ExecutionContract(
+                    skill=action_name,
+                    params=dict(base_params),
+                    stop_conditions=[
+                        str(base_params.get("stop_claim") or "target_visible")
+                    ],
+                    source="cortex",
+                ),
+            )
+        ]
 
     seen_skill_labels: set[str] = set()
     for label, contract in skill_warmups:
@@ -384,7 +430,11 @@ def run_episode(
     task_override: TaskRequest | None = None,
     procedure_override: ProcedureRecipe | None = None,
     step_budget: int | None = None,
+    observability: str = "partial",
 ):
+    if observability not in {"partial", "full"}:
+        raise ValueError("observability must be 'partial' or 'full'")
+    episode_build_env = build_full_env if observability == "full" else build_env
     compiler = compiler or build_compiler(compiler_name)
     memory = memory or OperationalMemory(root=memory_root)
     plan_cache = plan_cache or PlanCache(enabled=use_cache)
@@ -402,13 +452,14 @@ def run_episode(
     aligned_target = None
     env = render_adapter.env if render_adapter is not None else None
     adapter = render_adapter
-    adapter_closed = False
+    retain_adapter = keep_render_open or render_adapter is not None
+    adapter_handed_off = False
 
     try:
         observation = None
         if instruction is None:
             if adapter is None:
-                env = build_env(env_id, render_mode)
+                env = episode_build_env(env_id, render_mode)
                 adapter = MiniGridAdapter(env)
             observation = adapter.reset(seed=seed)
             operator_instruction = observation.raw.get("mission") or "Find the goal."
@@ -476,7 +527,7 @@ def run_episode(
                 created_at_loop=-1,
             )
 
-        if instruction is not None:
+        if instruction is not None and task.task_type == "go_to_object":
             target_probe = _probe_requested_target(env_id=env_id, seed=seed, task_request=task)
             if target_probe is not None:
                 aligned_target = target_probe.get("matched_target")
@@ -508,7 +559,7 @@ def run_episode(
                         step_name=cortex._current_step_name(),
                     )
                     memory_updates = cortex.finalize()
-                    return _assemble_result(
+                    result = _assemble_result(
                         compiler=compiler,
                         task=task,
                         procedure=procedure,
@@ -525,7 +576,10 @@ def run_episode(
                         prewarm_summary=prewarm_summary,
                         runtime_llm_calls_during_render=runtime_llm_calls_during_render,
                         cache_miss_during_render=cache_miss_during_render,
+                        render_adapter=adapter if retain_adapter else None,
                     )
+                    adapter_handed_off = retain_adapter and adapter is not None
+                    return result
 
         should_prewarm = (
             prewarm
@@ -557,7 +611,7 @@ def run_episode(
                 progress_callback("prewarm_finished", dict(prewarm_summary))
 
         if adapter is None:
-            env = build_env(env_id, render_mode)
+            env = episode_build_env(env_id, render_mode)
             adapter = MiniGridAdapter(env)
         if skip_reset:
             # Continue from current adapter state — window stays open, position preserved.
@@ -650,15 +704,8 @@ def run_episode(
             if cortex.execution_state["task_complete"] or report.status == "failed":
                 break
 
-        if adapter is not None and render_mode == "human":
-            if keep_render_open:
-                adapter_closed = True
-            else:
-                adapter.close()
-                adapter_closed = True
-
         memory_updates = cortex.finalize()
-        return _assemble_result(
+        result = _assemble_result(
             compiler=compiler,
             task=task,
             procedure=procedure,
@@ -675,10 +722,12 @@ def run_episode(
             prewarm_summary=prewarm_summary,
             runtime_llm_calls_during_render=runtime_llm_calls_during_render,
             cache_miss_during_render=cache_miss_during_render,
-            render_adapter=adapter if keep_render_open and render_mode == "human" else None,
+            render_adapter=adapter if retain_adapter else None,
         )
+        adapter_handed_off = retain_adapter and adapter is not None
+        return result
     finally:
-        if adapter is not None and not adapter_closed:
+        if adapter is not None and (not retain_adapter or not adapter_handed_off):
             adapter.close()
 
 

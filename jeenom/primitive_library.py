@@ -35,6 +35,28 @@ class PrimitiveSpec:
 
 
 TASK_PRIMITIVES: dict[str, PrimitiveSpec] = {
+    "act_until_evidence": PrimitiveSpec(
+        name="act_until_evidence",
+        consumes=("target_visible", "agent_pose"),
+        produces=("condition_satisfied", "task_complete"),
+        description=(
+            "Repeat one approved actuation only while fresh evidence does not satisfy "
+            "the mission stop condition."
+        ),
+        safety_notes=(
+            "Cortex must request fresh evidence before each action and stop before "
+            "actuation when the condition is satisfied."
+        ),
+        side_effects=("conditionally_actuates",),
+        runtime_kind="cortex_procedure",
+        runtime_value="act_until_evidence",
+        preconditions=("target predicate is grounded", "action is authorized"),
+        postconditions=("stop condition is satisfied",),
+        safety_class="actuation",
+        authority_level="operator",
+        failure_modes=("budget_exhausted", "no_progress"),
+        validation_hooks=("conditional_evidence_preflight",),
+    ),
     "locate_object": PrimitiveSpec(
         name="locate_object",
         consumes=("object_location",),

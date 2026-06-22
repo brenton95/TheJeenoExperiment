@@ -143,7 +143,7 @@ class LLMSynthesizer(SynthesizerBackend):
         "# Example: Manhattan distance grounding (ground_closest_door_manhattan)\n"
         "def ground_closest_door_manhattan(scene, selector):\n"
         "    doors = scene.find(\n"
-        "        object_type=selector.get('object_type', 'door'),\n"
+        "        object_type=selector['object_type'],\n"
         "        color=selector.get('color'),\n"
         "        exclude_colors=selector.get('exclude_colors') or [],\n"
         "    )\n"

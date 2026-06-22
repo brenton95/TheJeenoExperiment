@@ -181,7 +181,9 @@ class MismatchDetector:
             color = step.constraints.get("color")
             if not color:
                 continue
-            object_type = step.constraints.get("object_type") or "door"
+            object_type = step.constraints.get("object_type")
+            if not object_type:
+                continue
             matches = scene_model.find(color=color, object_type=object_type)
             if not matches:
                 results.append(OperationalMismatch(
@@ -204,8 +206,8 @@ class MismatchDetector:
     ) -> list[OperationalMismatch]:
         """Fire when claims fingerprint matches but grounding predicate result differs.
 
-        Concretely: the ranked-door ordering in active_claims used distances
-        computed at the time of grounding.  If the scene now has doors at
+        Concretely: the ranked-object ordering in active_claims used distances
+        computed at the time of grounding. If the scene now has objects at
         positions that would produce a different ranking (e.g. because agent
         moved between grounding and now, captured in the claims' recorded
         distances vs. freshly computed ones), fire this mismatch.
@@ -215,17 +217,22 @@ class MismatchDetector:
         # Only fires when claims ARE scene-valid; stale claims are covered by STALE_CLAIMS.
         if not active_claims.is_valid_for(scene_model):
             return []
-        ranked = active_claims.ranked_scene_doors
+        ranked = active_claims.ranked_objects
         if not ranked:
             return []
 
         from .schemas import SceneObject
 
-        # Recompute distances from current agent pose for the same door positions.
+        # Recompute distances from current agent pose for the same object positions.
         try:
             recomputed: list[tuple[float, str | None]] = []
             for entry in ranked:
-                obj = SceneObject(object_type="door", color=entry.color, x=entry.x, y=entry.y)
+                obj = SceneObject(
+                    object_type=entry.object_type,
+                    color=entry.color,
+                    x=entry.x,
+                    y=entry.y,
+                )
                 dist = scene_model.manhattan_distance_from_agent(obj)
                 recomputed.append((dist, entry.color))
 
@@ -235,14 +242,15 @@ class MismatchDetector:
             if fresh_order != original_order:
                 top_fresh = recomputed[fresh_order[0]]
                 top_original = ranked[0]
+                object_type = top_original.object_type
                 return [OperationalMismatch(
                     mismatch_type="GROUNDING_RELATION_INVALIDATED",
                     step_id=None,
                     description=(
-                        f"Ranked-door ordering has changed since grounding. "
-                        f"Claims ranked '{top_original.color}' door first "
+                        f"Ranked-{object_type} ordering has changed since grounding. "
+                        f"Claims ranked '{top_original.color}' {object_type} first "
                         f"(distance={top_original.distance}), but current scene "
-                        f"would rank '{top_fresh[1]}' door first "
+                        f"would rank '{top_fresh[1]}' {object_type} first "
                         f"(distance={top_fresh[0]})."
                     ),
                     severity="warning",

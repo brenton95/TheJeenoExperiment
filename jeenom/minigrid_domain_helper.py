@@ -24,7 +24,7 @@ class MiniGridDomainHelper:
 
     @property
     def object_types(self) -> tuple[str, ...]:
-        return tuple(self.operational_context.object_vocabulary or ("door",))
+        return tuple(self.operational_context.object_vocabulary)
 
     @property
     def supported_colors(self) -> tuple[str, ...]:
@@ -53,7 +53,19 @@ class MiniGridDomainHelper:
 
     @property
     def default_object_type(self) -> str:
-        return self.object_types[0] if self.object_types else "door"
+        return self.object_types[0] if self.object_types else "object"
+
+    def object_type_pattern(self) -> str:
+        return "|".join(re.escape(object_type) for object_type in self.object_types)
+
+    def pluralize_object_type(self, object_type: str) -> str:
+        plurals = self.operational_context.grounding_semantics.get(
+            "object_type_plurals",
+            {},
+        )
+        if isinstance(plurals, dict) and isinstance(plurals.get(object_type), str):
+            return str(plurals[object_type])
+        return object_type if object_type.endswith("s") else f"{object_type}s"
 
     @property
     def default_metric(self) -> str:
@@ -73,15 +85,17 @@ class MiniGridDomainHelper:
         return "|".join(re.escape(color) for color in self.supported_colors)
 
     def parse_target_fact(self, normalized: str) -> dict[str, Any] | None:
-        object_type = self.default_object_type
+        object_type_pattern = self.object_type_pattern()
+        if not object_type_pattern:
+            return None
         color_pattern = self.color_pattern()
         patterns = [
-            rf"^(?:please )?(?:your |the |my |our )?delivery target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type})$",
-            rf"^(?:please )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type}) is (?:your |the |my |our )?delivery target$",
-            rf"^(?:please )?target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type})$",
-            rf"^(?:please )?remember (?:that )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type})$",
-            rf"^(?:please )?set (?:the )?delivery target to (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type})$",
-            rf"^(?:please )?use (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type}) as (?:your |the |my |our )?delivery target$",
+            rf"^(?:please )?(?:your |the |my |our )?delivery target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern})$",
+            rf"^(?:please )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern}) is (?:your |the |my |our )?delivery target$",
+            rf"^(?:please )?target is (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern})$",
+            rf"^(?:please )?remember (?:that )?(?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern})$",
+            rf"^(?:please )?set (?:the )?delivery target to (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern})$",
+            rf"^(?:please )?use (?:the )?(?P<color>{color_pattern}) (?P<object_type>{object_type_pattern}) as (?:your |the |my |our )?delivery target$",
         ]
         for pattern in patterns:
             match = re.match(pattern, normalized)
@@ -100,9 +114,12 @@ class MiniGridDomainHelper:
 
     def parse_go_to_object_utterance(self, utterance: str) -> dict[str, str] | None:
         normalized = _normalize_text(utterance)
+        object_type_pattern = self.object_type_pattern()
+        if not object_type_pattern:
+            return None
         match = re.search(
             rf"\b(?P<verb>go to|go the|reach|find|get to|head to|navigate to)\s+"
-            rf"(?:the )?(?P<color>{self.color_pattern()}) (?P<object_type>{self.default_object_type})\b",
+            rf"(?:the )?(?P<color>{self.color_pattern()}) (?P<object_type>{object_type_pattern})\b",
             normalized,
         )
         if not match:
@@ -115,9 +132,12 @@ class MiniGridDomainHelper:
 
     def parse_exact_go_to_object_utterance(self, utterance: str) -> dict[str, str] | None:
         normalized = _normalize_text(utterance)
+        object_type_pattern = self.object_type_pattern()
+        if not object_type_pattern:
+            return None
         match = re.match(
             rf"^(?P<verb>go to|reach|find|get to|head to|navigate to)\s+"
-            rf"(?:the )?(?P<color>{self.color_pattern()}) (?P<object_type>{self.default_object_type})$",
+            rf"(?:the )?(?P<color>{self.color_pattern()}) (?P<object_type>{object_type_pattern})$",
             normalized,
         )
         if not match:
@@ -138,8 +158,11 @@ class MiniGridDomainHelper:
         return f"{verb} the {match['color']} {match['object_type']}"
 
     def color_reference_in_utterance(self, normalized: str) -> str | None:
+        object_type_pattern = self.object_type_pattern()
+        if not object_type_pattern:
+            return None
         match = re.search(
-            rf"\b(?P<color>{self.color_pattern()})\s+(?:one|{self.default_object_type})\b",
+            rf"\b(?P<color>{self.color_pattern()})\s+(?:one|{object_type_pattern})\b",
             normalized,
         )
         if match:
@@ -153,8 +176,9 @@ class MiniGridDomainHelper:
         return self.normalize_color(match.group("color"))
 
     def color_answer(self, normalized: str) -> str | None:
+        object_type_pattern = self.object_type_pattern()
         match = re.match(
-            rf"^(?:the )?(?P<color>{self.color_pattern()})(?: one| {self.default_object_type})?$",
+            rf"^(?:the )?(?P<color>{self.color_pattern()})(?: one| {object_type_pattern})?$",
             normalized,
         )
         if not match:
@@ -211,6 +235,38 @@ class MiniGridDomainHelper:
             object_type = entry.object_type
         return f"go to the {color} {object_type}"
 
+    def format_ranked_objects_from_entries(
+        self,
+        entries: Iterable[GroundedObjectEntry | dict[str, Any]],
+        *,
+        metric: str,
+        include_navigation_hint: bool = True,
+    ) -> str:
+        ranked_entries = list(entries)
+        first = ranked_entries[0] if ranked_entries else None
+        if isinstance(first, dict):
+            object_type = (
+                first.get("object_type")
+                or first.get("type")
+                or self.default_object_type
+            )
+        elif first is not None:
+            object_type = first.object_type
+        else:
+            object_type = self.default_object_type
+        object_type = str(object_type)
+        plural = self.pluralize_object_type(object_type)
+        lines = [
+            f"{plural.upper()} RANKED BY {metric.upper()} DISTANCE FROM AGENT"
+        ]
+        for i, entry in enumerate(ranked_entries):
+            lines.append(f"  {i + 1}. {self.entry_label(entry)}")
+        if include_navigation_hint:
+            lines.append(
+                f"\n(I can navigate to any specific {object_type} - tell me which color.)"
+            )
+        return "\n".join(lines)
+
     def format_ranked_doors_from_entries(
         self,
         entries: Iterable[GroundedObjectEntry | dict[str, Any]],
@@ -218,12 +274,12 @@ class MiniGridDomainHelper:
         metric: str,
         include_navigation_hint: bool = True,
     ) -> str:
-        lines = [f"DOORS RANKED BY {metric.upper()} DISTANCE FROM AGENT"]
-        for i, entry in enumerate(entries):
-            lines.append(f"  {i + 1}. {self.entry_label(entry)}")
-        if include_navigation_hint:
-            lines.append("\n(I can navigate to any specific door — tell me which color.)")
-        return "\n".join(lines)
+        """Backward-compatible alias for the former MiniGrid-specific name."""
+        return self.format_ranked_objects_from_entries(
+            entries,
+            metric=metric,
+            include_navigation_hint=include_navigation_hint,
+        )
 
     def format_color_plan_answer(
         self,
