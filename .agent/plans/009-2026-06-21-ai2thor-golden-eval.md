@@ -1,8 +1,17 @@
 # Plan 009 — `eval_golden_ai2thor.py`: live AI2-THOR golden path
 
-**Status:** ready for implementation · **Planner:** Opus · **Implementer:** Sonnet
+**Status:** BLOCKED by plan [010](010-...) · **Planner:** Opus · **Implementer:** Sonnet
 **Date:** 2026-06-21 · **Revised:** 2026-06-22 (reconciled to origin/master
-parametric refactor `33105b0`)
+parametric refactor `33105b0`; demoted — see block note)
+
+> **2026-06-22 BLOCK.** Sonnet found this plan's premise false: it claimed "the
+> seam exists, consume it, zero edits", but `Ai2thorSubstrateAdapter.run_task_episode`
+> is a stub (no `final_state` → KeyError in the kernel) and the AI2-THOR domain
+> helper lacks `parse_go_to_object_utterance` (→ AttributeError). The episode
+> runner was never wired. Plan **010** builds it (adapter-side, no kernel edits).
+> This eval is unblocked only after 010 lands. The reconciliation note below is
+> still valid; the "architecture is already proven — consume the seam" section was
+> over-stated and is superseded by 010.
 **Prereq reading:** `AGENTS.md` (§2.2 simplicity, §2.4 golden path = done),
 `CLAUDE.md` ("Golden path target for this spike", "Testing without a live Unity
 process", Dev Rule 11), plans [007](007-...) + [008](008-...), this file.
