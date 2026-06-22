@@ -408,3 +408,103 @@ treats non-door objects as unsupported by construction.
   `door|key|apple` (hardcode — minimal change per AGENTS.md §2.2; dynamic-vocabulary
   rewrite deferred to Phase 8.5). `LLMCompiler` prompt coupling **filed, not fixed**
   (user decision 2026-06-20) — the spike uses `SmokeTestCompiler`.
+
+### F8 — `run_demo.run_episode` is MiniGrid-specific; episode loop cannot be shared across substrates (kernel-adjacent)
+
+`run_demo.run_episode` is the sense→decide→act loop that drives a full task
+episode. It is structurally substrate-agnostic (Cortex, Sense, Spine are
+injected), but it lives in `run_demo.py` which imports `gymnasium`, `minigrid`,
+`MiniGridAdapter`, `MiniGridSense`, `MiniGridSpine` at module level. It also
+carries MiniGrid-only machinery: `_probe_requested_target` (grid-probe by
+`env_id`), `observability` partial/full split, `render_adapter` handoff, and
+gym-reward-based success signaling. The AI2-THOR substrate therefore cannot
+import or reuse `run_episode` without pulling in the entire MiniGrid stack.
+
+- **Surfaced by:** plan 010 (AI2-THOR episode runner). The AI2-THOR adapter
+  mirrors the loop structure locally in `Ai2thorSubstrateAdapter.run_task_episode`,
+  which is structural duplication — every divergence point is a requirements
+  signal for the shared-loop design.
+- **Severity:** kernel-adjacent. Does not block the spike (the duplicated loop
+  works), but blocks a clean multi-substrate runtime.
+- **Triage for Phase 15:** extract the substrate-independent core of
+  `run_episode` (compile/cache task+procedure, onboard cortex, sense→decide→act
+  loop, finalize+assemble result) into a shared function or protocol method.
+  Substrate-specific hooks (target probe, render window, success signal) become
+  injected callbacks or adapter methods. `MiniGridSubstrateAdapter` and
+  `Ai2thorSubstrateAdapter` then call the shared loop, not each other.
+- **Status:** filed. AI2-THOR episode runner implemented as a local duplicate
+  (plan 010). Unification is Phase 15 kernel work.
+
+### F9 — Task completion path is implicitly MiniGrid-shaped: requires sense adjacency claim + gym-reward `done` signal (kernel)
+
+The kernel's task-completion mechanism for `go_to_object` procedures depends on
+two signals that MiniGrid provides but AI2-THOR does not:
+
+1. **Sense-computed `adjacency_to_target` claim.** The cortex advances past
+   `navigate_to_object` and `verify_adjacent` procedure steps only when the
+   sense projects `adjacency_to_target=True` into the evidence claims
+   (cortex.py:319). MiniGrid's sense computes this from grid distance. AI2-THOR
+   had no equivalent — plan 010 added it to `Ai2thorSense`. The spine
+   independently computes adjacency via `reach_threshold = grid_size * 1.5`
+   where `grid_size` is derived from `GetReachablePositions` at runtime.
+   Initially the sense used a hardcoded `0.375m` (= 0.25 × 1.5) copy of that
+   value, which **would have diverged** from the spine on scenes with non-0.25
+   grid spacing. **Resolved adapter-side (plan 010 review):** the episode runner
+   now constructs `Ai2thorSense(adjacency_threshold=spine.reach_threshold)`, so
+   sense consumes the spine's live derived threshold — the spine is the single
+   source of truth and the two cannot diverge. Residual caveat: the `0.375`
+   default still applies if `Ai2thorSense` is constructed *without* a spine
+   (test fixtures only, where the mock's 0.25 grid makes it correct anyway).
+
+2. **`done` skill success signal.** The cortex sets `task_complete=True` only
+   when `update_from_report` sees `current_skill == "done"` and
+   `report.status == "succeeded"` (cortex.py:242-243). MiniGrid's spine returns
+   `succeeded` for `done` when the gym signals `terminated=True` with positive
+   reward. AI2-THOR has no gym reward signal (F3). Plan 010 changed the
+   AI2-THOR spine to return `succeeded` unconditionally for `done`, relying on
+   the sense adjacency claim to gate reaching the `done` step. This is
+   F3-compatible but structurally fragile: the postcondition is now split across
+   sense (adjacency gate) and spine (unconditional success), rather than being a
+   single coherent check.
+
+- **Surfaced by:** plan 010 (AI2-THOR episode runner). The plan expected the
+  spine's existing `_postcondition_check` to drive task completion; in practice
+  the cortex's completion path requires upstream sense claims and a
+  reward-shaped `done` report that the spine's postcondition check does not
+  produce.
+- **Severity:** kernel-level coupling. Part 1 (threshold) resolved adapter-side;
+  part 2 (split postcondition across sense gate + unconditional spine `done`)
+  remains a structural coupling worth a kernel decision in Phase 15.
+- **Triage for Phase 15:** (a) **Done (adapter-side, plan 010 review):** the
+  runner threads the spine's derived `reach_threshold` into the sense adjacency
+  threshold so they agree by construction. A future shared substrate config could
+  formalise this. (b) Consider whether the cortex's task-completion logic should
+  consume the spine's postcondition report directly rather than requiring a
+  separate sense adjacency claim. (c) The `done` skill's success signal should be
+  substrate-configurable — gym-reward for MiniGrid, postcondition-check for
+  AI2-THOR — rather than hardcoded per spine.
+- **Status:** part 1 resolved adapter-side (single-source threshold injection);
+  part 2 filed for Phase 15. Both paths are correct for the spike's mock scenes.
+
+### F10 — "No LLM during render" is met by-construction on AI2-THOR, by-prewarm-cache on MiniGrid
+
+The golden-path invariant `runtime_llm_calls_during_render == 0` is enforced by a
+genuinely different mechanism per substrate, and this is worth recording so the
+009 eval does not assume it is enforced by the runtime counter alone:
+
+- **MiniGrid:** sense can JIT-compile at runtime, so `run_demo.run_episode`
+  *counts* runtime compiler calls and relies on prewarming the plan cache to keep
+  the count at 0. The metric is load-bearing — a prewarm miss would make it
+  non-zero.
+- **AI2-THOR:** `Ai2thorSense`/`Ai2thorSpine` are pure dispatch — they hardcode
+  `runtime_compiler_call=False` and have no compile path at all. The episode
+  runner still counts (mirroring MiniGrid, for parity and future-proofing), but
+  the count is 0 *by construction*, not by caching. The assertion therefore
+  cannot regress on this substrate today; it documents an architectural property,
+  not a runtime guard.
+
+- **Surfaced by:** plan 010 review. **Severity:** informational — not a defect.
+  **Triage for Phase 15:** if AI2-THOR ever grows a runtime compile path (e.g.
+  LLM-driven sense), the counter becomes load-bearing exactly as MiniGrid's is;
+  until then, 009's `== 0` assertion is satisfied structurally.
+- **Status:** documented (no action needed).

@@ -124,13 +124,9 @@ def test_capability_registry_has_apple_go_to_object_handle(adapter: Ai2thorSubst
     assert spec.layer == "task"
 
 
-def test_run_task_episode_and_run_motor_actions_do_not_run_live_episode(
+def test_run_motor_actions_stub_does_not_run_live_episode(
     adapter: Ai2thorSubstrateAdapter,
 ) -> None:
-    episode_result = adapter.run_task_episode(instruction="go to the apple")
-    assert episode_result["task_complete"] is False
-    assert episode_result["success"] is False
-
     motor_result = adapter.run_motor_actions(seed=0, actions=["move_forward"])
     assert motor_result["task_complete"] is False
     assert motor_result["success"] is False
@@ -410,6 +406,7 @@ class _NavMockController:
         agent_yaw: float = 0.0,
         blocked_cells: set[tuple[float, float]] | None = None,
         grid_size: float = 0.25,
+        objects: list[dict[str, Any]] | None = None,
     ) -> None:
         self.reachable_points = reachable_points
         self.agent_x = agent_x
@@ -417,6 +414,7 @@ class _NavMockController:
         self.agent_yaw = agent_yaw
         self.blocked_cells: set[tuple[float, float]] = blocked_cells or set()
         self.grid_size = grid_size
+        self.objects: list[dict[str, Any]] = objects or []
         self.calls: list[dict[str, Any]] = []
 
     def step(self, **kwargs: Any) -> _FakeEvent:
@@ -453,7 +451,7 @@ class _NavMockController:
 
         return _FakeEvent(metadata={
             "lastActionSuccess": last_action_success,
-            "objects": [],
+            "objects": self.objects,
             "agent": {
                 "position": {"x": self.agent_x, "y": 0.0, "z": self.agent_z},
                 "rotation": {"x": 0.0, "y": self.agent_yaw, "z": 0.0},
@@ -775,3 +773,118 @@ def test_nav_rotation_step_param() -> None:
     # 270° → one turn_left
     turns = spine._turn_actions(0, 270)
     assert turns == ["turn_left"]
+
+
+# ── A1: parse_go_to_object_utterance tests ────────────────────────────
+
+def test_parse_go_to_object_utterance_apple() -> None:
+    ctx = Ai2thorOperationalContext.default()
+    helper = Ai2thorDomainHelper(operational_context=ctx)
+    result = helper.parse_go_to_object_utterance("go to the red apple")
+    assert result is not None
+    assert result["color"] == "red"
+    assert result["object_type"] == "apple"
+    assert result["verb"] == "go to"
+
+
+def test_parse_go_to_object_utterance_no_color() -> None:
+    ctx = Ai2thorOperationalContext.default()
+    helper = Ai2thorDomainHelper(operational_context=ctx)
+    result = helper.parse_go_to_object_utterance("go to the apple")
+    assert result is not None
+    assert result["color"] == ""
+    assert result["object_type"] == "apple"
+
+
+def test_parse_go_to_object_utterance_non_go_to() -> None:
+    ctx = Ai2thorOperationalContext.default()
+    helper = Ai2thorDomainHelper(operational_context=ctx)
+    assert helper.parse_go_to_object_utterance("hello world") is None
+    assert helper.parse_go_to_object_utterance("pick up the red apple") is None
+
+
+def test_parse_go_to_object_utterance_verb_variants() -> None:
+    ctx = Ai2thorOperationalContext.default()
+    helper = Ai2thorDomainHelper(operational_context=ctx)
+    for verb in ("navigate to", "head to", "reach", "find", "get to"):
+        result = helper.parse_go_to_object_utterance(f"{verb} the red apple")
+        assert result is not None, f"failed for verb: {verb}"
+        assert result["object_type"] == "apple"
+
+
+# ── A2: run_task_episode end-to-end test ──────────────────────────────
+
+def test_run_task_episode_go_to_red_apple() -> None:
+    """Drive run_task_episode through the mock controller with an apple a few
+    cells from the agent. Asserts task_complete=True, zero runtime LLM calls.
+
+    Mimics the operator_station call path: compose_known_task +
+    compose_known_procedure → pass as task_override/procedure_override."""
+    from jeenom.ai2thor_domain_helper import Ai2thorDomainHelper
+    from jeenom.ai2thor_operational_context import Ai2thorOperationalContext
+    from jeenom.llm_compiler import build_compiler, canonical_task_params
+    from jeenom.memory import OperationalMemory
+    from jeenom.plan_cache import PlanCache
+    from jeenom.schemas import ProcedureRecipe, TaskRequest
+
+    reachable = _make_reachable_grid(range(5), range(5))
+    apple_obj = {
+        "objectType": "Apple",
+        "position": {"x": 0.5, "y": 0.0, "z": 0.5},
+    }
+    ctrl = _NavMockController(
+        reachable,
+        agent_x=0.0,
+        agent_z=0.0,
+        agent_yaw=0.0,
+        objects=[apple_obj],
+    )
+
+    adapter = Ai2thorSubstrateAdapter(controller=ctrl)
+    compiler = build_compiler("smoke_test")
+    # Temp memory root: OperationalMemory() defaults to the repo's memory/ dir
+    # and would mutate the tracked knowledge.yaml on every test run.
+    import tempfile
+    from pathlib import Path
+
+    memory = OperationalMemory(root=Path(tempfile.mkdtemp()))
+    plan_cache = PlanCache(enabled=True)
+
+    ctx = Ai2thorOperationalContext.default()
+    helper = Ai2thorDomainHelper(operational_context=ctx)
+    parsed = helper.parse_go_to_object_utterance("go to the red apple")
+    assert parsed is not None
+
+    task_override = TaskRequest(
+        instruction=f"go to the {parsed['color']} {parsed['object_type']}",
+        task_type="go_to_object",
+        params=canonical_task_params(
+            color=parsed["color"],
+            object_type=parsed["object_type"],
+        ),
+        source="operator_station_known_family",
+    )
+    procedure_override = ProcedureRecipe(
+        task_type="go_to_object",
+        steps=["locate_object", "navigate_to_object", "verify_adjacent", "done"],
+        source="smoke_test_compiler",
+    )
+
+    result = adapter.run_task_episode(
+        instruction="go to the red apple",
+        compiler_name="smoke_test",
+        compiler=compiler,
+        seed=42,
+        max_loops=128,
+        memory=memory,
+        plan_cache=plan_cache,
+        task_override=task_override,
+        procedure_override=procedure_override,
+    )
+
+    assert "final_state" in result, f"missing final_state key; keys: {list(result.keys())}"
+    assert result["final_state"]["task_complete"] is True, (
+        f"task_complete should be True; final_state={result['final_state']}"
+    )
+    assert result["runtime_llm_calls_during_render"] == 0
+    assert result["cache_miss_during_render"] == 0

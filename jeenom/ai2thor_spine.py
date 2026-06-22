@@ -98,7 +98,7 @@ class Ai2thorSpine:
 
         if skill == "done":
             report = ExecutionReport(
-                status="running",
+                status="succeeded",
                 progress={"contract": skill},
                 source="spine",
             )

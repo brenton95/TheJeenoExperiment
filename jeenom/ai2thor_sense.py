@@ -32,10 +32,22 @@ class Ai2thorSense:
     at module level.
     """
 
-    def __init__(self, memory: Any, compiler: Any, plan_cache: Any = None) -> None:
+    def __init__(
+        self,
+        memory: Any,
+        compiler: Any,
+        plan_cache: Any = None,
+        adjacency_threshold: float = 0.375,
+    ) -> None:
         self.memory = memory
         self.compiler = compiler
         self.plan_cache = plan_cache
+        # The episode runner injects the spine's live reach_threshold
+        # (grid_size * 1.5) so sense and spine agree on "arrived". The 0.375
+        # default is a degenerate fallback only (0.25 default grid * 1.5) for
+        # callers that construct sense without the spine; it is wrong for any
+        # non-default grid spacing. See orpi_spec F9.
+        self._adjacency_threshold = adjacency_threshold
 
     def tick(
         self,
@@ -105,6 +117,14 @@ class Ai2thorSense:
                 target_location = (ox, oy)
                 target_object = grid_obj
 
+        adjacency = False
+        if target_location is not None:
+            dist = geometry.euclidean(
+                (float(agent_x), float(agent_y)),
+                (float(target_location[0]), float(target_location[1])),
+            )
+            adjacency = dist <= self._adjacency_threshold
+
         return WorldModelSample(
             direction=agent_dir,
             step_count=0,
@@ -115,6 +135,7 @@ class Ai2thorSense:
             target_visible=target_visible,
             target_location=target_location,
             target_object=target_object,
+            adjacency_to_target=adjacency,
         )
 
     def project_to_cortex(self, sample: WorldModelSample) -> OperationalEvidence:
@@ -124,6 +145,7 @@ class Ai2thorSense:
             "target_visible": sample.target_visible,
             "target_location": sample.target_location,
             "target_object": sample.target_object,
+            "adjacency_to_target": sample.adjacency_to_target,
         }
         return OperationalEvidence(claims=claims, confidence=1.0, source="sense")
 
