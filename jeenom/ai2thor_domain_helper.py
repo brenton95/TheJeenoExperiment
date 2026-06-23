@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from .schemas import OperationalContext
 
@@ -30,6 +31,12 @@ class Ai2thorDomainHelper:
     def object_type_pattern(self) -> str:
         return "|".join(re.escape(t) for t in self.object_types)
 
+    def normalize_color(self, color: str) -> str:
+        return color
+
+    def parse_target_fact(self, normalized: str) -> dict[str, Any] | None:
+        return None
+
     def parse_go_to_object_utterance(self, utterance: str) -> dict[str, str] | None:
         normalized = _normalize_text(utterance)
         object_type_pattern = self.object_type_pattern()
@@ -38,6 +45,35 @@ class Ai2thorDomainHelper:
         match = re.search(
             rf"\b(?P<verb>go to|go the|reach|find|get to|head to|navigate to)\s+"
             rf"(?:the )?(?:(?P<color>[a-z]+) )?(?P<object_type>{object_type_pattern})\b",
+            normalized,
+        )
+        if not match:
+            return None
+        color = match.group("color") or ""
+        return {
+            "verb": match.group("verb"),
+            "color": color,
+            "object_type": match.group("object_type"),
+        }
+
+    def canonicalize_task_instruction(self, utterance: str) -> str:
+        match = self.parse_go_to_object_utterance(utterance)
+        if not match:
+            return utterance
+        verb = match["verb"]
+        if verb in {"go the", "head to", "navigate to"}:
+            verb = "go to"
+        color_part = f"{match['color']} " if match["color"] else ""
+        return f"{verb} the {color_part}{match['object_type']}"
+
+    def parse_exact_go_to_object_utterance(self, utterance: str) -> dict[str, str] | None:
+        normalized = _normalize_text(utterance)
+        object_type_pattern = self.object_type_pattern()
+        if not object_type_pattern:
+            return None
+        match = re.match(
+            rf"^(?P<verb>go to|reach|find|get to|head to|navigate to)\s+"
+            rf"(?:the )?(?:(?P<color>[a-z]+) )?(?P<object_type>{object_type_pattern})$",
             normalized,
         )
         if not match:

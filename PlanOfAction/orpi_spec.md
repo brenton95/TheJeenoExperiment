@@ -508,3 +508,47 @@ genuinely different mechanism per substrate, and this is worth recording so the
   LLM-driven sense), the counter becomes load-bearing exactly as MiniGrid's is;
   until then, 009's `== 0` assertion is satisfied structurally.
 - **Status:** documented (no action needed).
+
+### F11 — AI2-THOR manifest was skeletal; front-door path required filling kernel-read fields (manifest)
+
+The AI2-THOR primitive manifest (`_ai2thor_manifest_dict`) was created in plan 002
+as a boundary-test skeleton with `implementation_status="unsupported"`,
+`validation_hooks=[]`, and `failure_modes=[]`. The boundary tests only asserted
+contract shape, not readiness-graph executability. Plan 009 (front-door golden
+eval via `handle_utterance`) exposed that the readiness graph gates actuation
+primitives on `not spec.validation_hooks` — empty hooks → `validation_required` →
+non-executable graph → `ExecutionTicket` rejection.
+
+- **Surfaced by:** plan 009 front-door integration. The back-door path (plan 010,
+  calling `run_task_episode` directly) never hit this because it bypasses the
+  readiness graph entirely.
+- **Severity:** manifest-level. Required filling `validation_hooks`,
+  `failure_modes`, and `implementation_status` with substrate-true values.
+- **Triage for Phase 15:** the readiness graph's presence-check on
+  `validation_hooks` is a kernel convention that the manifest must satisfy, but
+  nothing actually *executes* the named hook — it is a declaration, not a
+  callback. Consider whether ORPI should formalize which manifest fields are
+  kernel-read vs. informational.
+- **Status:** resolved (plan 009). `validation_hooks=["ai2thor_env_action_preflight"]`,
+  `failure_modes=["no_path_found", "target_missing"]`,
+  `implementation_status="implemented"`.
+
+### F12 — AI2-THOR domain helper implements only kernel-required surface (domain helper)
+
+`Ai2thorDomainHelper` implements only the methods the golden-path `handle_utterance`
+touches: `parse_target_fact` (returns `None` — no fact-teaching path),
+`parse_exact_go_to_object_utterance`, `normalize_color` (identity pass-through),
+and `canonicalize_task_instruction`. No shared `DomainHelper` Protocol exists, so
+the kernel-required vs. substrate-optional method boundary is implicit.
+
+- **Surfaced by:** plan 009 front-door integration. `handle_utterance` calls
+  domain helper methods during utterance classification, task composition, and
+  instruction resolution — paths the back-door `run_task_episode` never exercises.
+- **Severity:** adapter-level. Non-golden-path utterances (grounding queries,
+  color-plan answers, ranked-object formatting) will `AttributeError` on missing
+  methods.
+- **Triage for Phase 15:** define a `DomainHelper` Protocol in the kernel with
+  required vs. optional methods, so new substrates know which surface to
+  implement. Alternatively, make the operator station's utterance classifier
+  check `hasattr` before calling substrate-optional methods.
+- **Status:** documented. Revisit when a non-golden-path AI2-THOR eval is built.

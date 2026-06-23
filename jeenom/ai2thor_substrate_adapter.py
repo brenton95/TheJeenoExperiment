@@ -28,16 +28,17 @@ def _ai2thor_manifest_dict() -> dict[str, Any]:
             _top_level_task_capability(
                 name="task.go_to_object.apple",
                 description=(
-                    "Run the go_to_object recipe for a grounded apple target "
-                    "(boundary-test skeleton; sense/spine not yet implemented)."
+                    "Run the go_to_object recipe for a grounded apple target."
                 ),
                 inputs=["target.object_type", "target_location"],
                 outputs=["task_complete", "execution_report"],
                 side_effects=["moves_agent"],
-                implementation_status="unsupported",
+                implementation_status="implemented",
                 runtime_binding=None,
                 safety_class="actuation",
                 authority_level="operator",
+                failure_modes=["no_path_found", "target_missing"],
+                validation_hooks=["ai2thor_env_action_preflight"],
             ),
         ],
     }
