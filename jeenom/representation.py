@@ -33,9 +33,18 @@ class RepresentationStore:
     ) -> None:
         self.memory = memory
         self.knowledge_channel = knowledge_channel
-        self._claims: dict[str, ClaimRecord] = {}
         self._provenance: list[dict[str, Any]] = []
         self._active_claims: StationActiveClaims | None = None
+
+    @property
+    def _claims(self) -> dict[str, ClaimRecord]:
+        """The single mission-scoped claim store, owned by OperationalMemory.
+
+        Read through a property (not a captured reference) so a typed reset that
+        reassigns ``memory.claims`` is always reflected here. The cortex belief
+        loop writes the same dict, so this is genuinely one store.
+        """
+        return self.memory.claims
 
     # -- claims -----------------------------------------------------------------
 

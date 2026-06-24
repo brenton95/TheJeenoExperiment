@@ -454,11 +454,14 @@ class MiniGridSense:
         ``UNVERIFIABLE_DECAY_STEPS`` ticks remain ``unverifiable`` (still believed);
         cells unseen at/after the threshold decay to ``unknown`` and are dropped.
 
-        # TECH-DEBT(occupancy-decay-sites): the spatial passable belief decays here in
-        # the perception layer, via the same freshness TTL as the cortex, rather than
-        # being unified with the Step 2 cortex claim-decay loop. It must be Sense-side
-        # because the planner reads passable_positions from percepts before the cortex
-        # runs. Unifying the two decay sites onto one claim store is deferred.
+        # TECH-DEBT(occupancy-decay-sites): claim unification merged the cortex belief
+        # store into the single mission-scoped memory.claims store, but this spatial
+        # passable belief still decays here in the perception layer via the same
+        # freshness TTL, as a separate per-cell store. It stays Sense-side because the
+        # planner reads passable_positions from percepts before the cortex runs, and
+        # folding per-cell occupancy onto ClaimRecord would change per-cell decay
+        # semantics and add hundreds of validated records per tick. This second decay
+        # site is deliberately deferred (not closed by the claim merge).
         """
         for cell in observed_passable:
             self._passable_belief[cell] = tick

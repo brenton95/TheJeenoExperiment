@@ -2636,43 +2636,15 @@ class ArbitrationTrace:
 
 
 @dataclass
-class ObservationClaim:
-    """L1 sensory output stored in Cortex's internal claim store.
-
-    Wraps a raw evidence value with provenance so every fact inside the
-    Cortex execution loop has a traceable source and scope.
-    """
-
-    key: str                      # evidence name, e.g. "target_location"
-    value: Any                    # raw value, e.g. (3, 4) or True
-    source: str = "sense"         # component that produced it
-    level: str = "command"        # "primitive" | "command"
-    confidence: float = 1.0
-    scope: str = "grounding"
-    freshness: str = "current"    # current | unverifiable | stale | unknown
-    last_observed_tick: int | None = None  # step_count when last observed in-view
-
-
-@dataclass
-class ExecutionClaim:
-    """L1 motor output — provenance record for a completed motor primitive or command."""
-
-    source_primitive: str         # e.g. "move_forward" / "navigate_to_object"
-    level: str                    # "primitive" | "command" | "procedure" | "task"
-    scope: str = "motor"
-    success: bool = True
-    steps_taken: int = 0
-    payload: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class ClaimRecord:
-    """Representation-store claim wrapper.
+    """The single claim type.
 
-    Existing specialized claim types remain valid at block boundaries. ClaimRecord
-    is the small common shape used by the knowledge surface so facts, beliefs,
-    hypotheses, operator assertions, observations, and execution results retain
-    authority/provenance/freshness.
+    One typed shape for every claim — facts, beliefs, hypotheses, operator
+    assertions, observations, execution results, and procedures — so each retains
+    kind/status/scope/authority/provenance/freshness. Hot-path sensory beliefs are
+    authored as ``kind="observation"`` and carry ``last_observed_tick`` for the
+    freshness decay machine; both the Cortex belief loop and the RepresentationStore
+    read/write the same mission-scoped store on ``OperationalMemory``.
     """
 
     claim_id: str
@@ -2688,6 +2660,7 @@ class ClaimRecord:
     provenance: dict[str, Any] = field(default_factory=dict)
     freshness: str = "current"
     invalidation: dict[str, Any] = field(default_factory=dict)
+    last_observed_tick: int | None = None  # substrate step_count when last in-view
 
     def __post_init__(self) -> None:
         if self.kind not in CLAIM_KINDS:
@@ -2748,6 +2721,7 @@ class ClaimRecord:
             provenance=_ensure_dict(mapping.get("provenance", {}), "ClaimRecord.provenance"),
             freshness=_ensure_str(mapping.get("freshness", "current"), "ClaimRecord.freshness"),
             invalidation=_ensure_dict(mapping.get("invalidation", {}), "ClaimRecord.invalidation"),
+            last_observed_tick=mapping.get("last_observed_tick"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -2765,6 +2739,7 @@ class ClaimRecord:
             "provenance": dict(self.provenance),
             "freshness": self.freshness,
             "invalidation": dict(self.invalidation),
+            "last_observed_tick": self.last_observed_tick,
         }
 
 

@@ -162,6 +162,38 @@ def _approved(
     return ApprovedCommand(command_type=command_type, utterance=utterance, payload=p, **kwargs)
 
 
+# Command kinds a heterogeneous sequence step may execute. Fail-closed: anything
+# else (nested sequence/procedure/mission, clarifications, unsupported, gibberish)
+# fails the whole sequence before any step runs. Each kind below already mints its
+# own authority inside execute_command (RawMotorTicket / ExecutionTicket / none for
+# read-only queries).
+_SEQUENCE_STEP_KINDS = frozenset(
+    {
+        "task_instruction",
+        "motor_execute",
+        "status_query",
+        "ground_target_query",
+        "metric_query",
+        "claim_reference",
+        "task_selector",
+        "cache_query",
+    }
+)
+
+# Intent types that already represent multi-step / decomposed requests. The
+# fail-loud fallback guard only fires when the compiler fell back to a SINGLE
+# non-decomposed intent for an utterance that clearly held several steps.
+_SEQUENCE_LIKE_INTENT_TYPES = frozenset(
+    {
+        "sequence_instruction",
+        "motor_sequence",
+        "procedure_recall",
+        "conditional_sense_motor",
+        "mission_contract",
+    }
+)
+
+
 def classify_utterance(
     utterance: str,
     registry: CapabilityRegistry,
@@ -718,13 +750,77 @@ class OperatorStationSession:
             ),
             pending_proposal=pending_proposal,
         )
+        fell_back = self._compile_used_fallback("compile_operator_intent")
         self._log_compiler_fallback("compile_operator_intent")
+        # Fail loud, never silently. If the LLM could not compile this and the
+        # deterministic fallback produced a single, non-decomposed intent for an
+        # utterance that clearly held several steps, answering one clause would be
+        # silent semantic loss. Ask the operator to split/rephrase instead.
+        if (
+            fell_back
+            and intent.intent_type not in _SEQUENCE_LIKE_INTENT_TYPES
+            and self._looks_multi_intent(utterance)
+        ):
+            self.log(
+                "LLM compile fell back on a multi-step utterance; refusing to answer "
+                "a single clause and asking the operator to split/rephrase"
+            )
+            return ApprovedCommand(
+                command_type="clarification",
+                utterance=utterance,
+                payload={
+                    "message": (
+                        "MULTI-STEP REQUEST NOT COMPILED\n"
+                        "I could not compile that as a single request, and it looks like "
+                        "several steps. Please issue them one at a time, or join them with "
+                        "'then' so I run them in order — e.g. 'turn left then go forward "
+                        "twice then tell me what you see'."
+                    )
+                },
+            )
         self.log(
             "operator intent: "
             f"type={intent.intent_type} confidence={intent.confidence:.2f} "
             f"reason={intent.reason}"
         )
         return self.turn_orchestrator.dispatch(self, intent, utterance)
+
+    def _compile_used_fallback(self, method_name: str) -> bool:
+        """Whether the most recent compile of `method_name` used the deterministic fallback."""
+        history = getattr(self.compiler, "call_history", None)
+        if not history:
+            return False
+        for call in reversed(history):
+            if call.get("method_name") == method_name:
+                return bool(call.get("used_fallback"))
+        return False
+
+    def _looks_multi_intent(self, utterance: str) -> bool:
+        """Conservative check: does the utterance hold >=2 deterministically-detectable
+        motor/task sub-intents joined by a conjunction?
+
+        Used only as a fail-loud guard after an LLM compile fallback: a false negative
+        just proceeds normally, and a false positive only yields a clarification, never
+        a wrong action. Bare 'and' splitting is acceptable here (unlike primary routing)
+        precisely because the worst case is an extra clarification.
+        """
+        from .llm_compiler import _parse_motor_command
+
+        normalized = _normalize_utterance(utterance)
+        parts = [
+            p.strip()
+            for p in re.split(r"\b(?:and then|then|followed by|and)\b|,", normalized)
+            if p and p.strip()
+        ]
+        if len(parts) < 2:
+            return False
+        executable = 0
+        for part in parts:
+            if _parse_motor_command(part) is not None:
+                executable += 1
+            elif self.domain_helper.parse_go_to_object_utterance(part) is not None:
+                executable += 1
+        return executable >= 2
 
     def _log_compiler_fallback(self, method_name: str) -> None:
         """Surface, per turn, when an LLM compile silently fell back to the deterministic
@@ -5756,91 +5852,46 @@ class OperatorStationSession:
         step_labels = " → ".join(steps)
         return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)
 
-    def _build_sequence_request_plan(
-        self,
-        utterance_steps: list[str],
-        original_utterance: str,
-    ) -> RequestPlan | None:
-        """Build a multi-step RequestPlan from a list of raw task utterances."""
-        from .schemas import RequestPlan, RequestPlanStep
-        import uuid
-
-        plan_steps: list[RequestPlanStep] = []
-        prev_step_id: str | None = None
-        for idx, step_utterance in enumerate(utterance_steps):
-            try:
-                task = self.compose_known_task(step_utterance)
-            except ValueError:
-                self.log(f"sequence build failed: cannot resolve handle for '{step_utterance}'")
-                return None
-            task_handle = self.planning_semantics.task_handle(
-                task.task_type,
-                task.params.get("object_type"),
-            )
-            if task_handle is None:
-                return None
-            step_id = f"step_{idx}"
-            plan_steps.append(
-                RequestPlanStep(
-                    step_id=step_id,
-                    layer="task",
-                    operation="execute",
-                    required_handle=task_handle,
-                    implementation_status="implemented",
-                    constraints={"utterance": step_utterance},
-                    depends_on=[prev_step_id] if prev_step_id is not None else [],
-                )
-            )
-            prev_step_id = step_id
-
-        return RequestPlan(
-            request_id=str(uuid.uuid4()),
-            original_utterance=original_utterance,
-            objective_type="task",
-            objective_summary=f"sequence: {' → '.join(utterance_steps)}",
-            steps=plan_steps,
-            expected_response="execute_task",
-        )
-
     def _run_sequence(self, utterance_steps: list[str], original_utterance: str) -> str:
-        """Execute a sequence of raw task utterances: build RequestPlan, gate, run each step."""
-        plan = self._build_sequence_request_plan(utterance_steps, original_utterance)
-        if plan is None:
-            return (
-                "SEQUENCE ERROR\n"
-                "Could not build execution plan — one or more steps could not be compiled.\n"
-                "Ensure each step is a valid task instruction (e.g. 'go to the red door')."
-            )
+        """Execute a heterogeneous sequence of raw step utterances.
 
-        claims_valid = self._claims_valid_for_current_environment()
-        readiness_graph = self.cortex_session.evaluate(
-            plan,
-            active_claims=self.active_claims,
-            claims_valid=claims_valid,
-            environment_identity=self.current_environment_identity,
-        )
-        self.last_request_plan = plan
-        self.last_readiness_graph = readiness_graph
+        Each step is classified to its own command kind and executed through the
+        normal per-command authority/dispatch path (RawMotorTicket for motor steps,
+        ExecutionTicket for task steps, the read-only query path for queries), so
+        motor, task, and query steps may be mixed in one chain. Every step is
+        validated before any executes: an uncompilable, nested, or non-executable
+        step fails the whole sequence with no partial execution.
+        """
+        # Pass 1: classify every step and reject the whole sequence before running
+        # any of them if a step cannot compile into an executable sequence step.
+        commands: list[tuple[str, ApprovedCommand]] = []
+        for step_utterance in utterance_steps:
+            command = self._classify_utterance(step_utterance)
+            if command.kind == "unresolved":
+                command = self.command_from_llm_intent(step_utterance)
+            if command.kind not in _SEQUENCE_STEP_KINDS:
+                self.log(
+                    f"sequence build failed: step {step_utterance!r} is not an "
+                    f"executable sequence step (kind={command.kind!r})"
+                )
+                return (
+                    "SEQUENCE ERROR\n"
+                    f"Step '{step_utterance}' could not be compiled into an "
+                    f"executable step (resolved to {command.kind!r}).\n"
+                    "Each step must be a task ('go to the red door'), a motor "
+                    "action ('turn right'), or a query ('what do you see')."
+                )
+            commands.append((step_utterance, command))
 
-        if readiness_graph.graph_status != "executable":
-            blocking = readiness_graph.blocking_step_id or "unknown"
-            return (
-                f"SEQUENCE BLOCKED\n"
-                f"graph_status={readiness_graph.graph_status}\n"
-                f"blocking_step={blocking}\n"
-                f"{readiness_graph.explanation}"
-            )
-
+        # Pass 2: execute each step through its proper command path.
         results: list[str] = []
-        for step_idx, step_utterance in enumerate(utterance_steps):
-            self.log(f"sequence step {step_idx + 1}/{len(utterance_steps)}: {step_utterance!r}")
-            result = self._run_task_from_instruction(
-                step_utterance,
-                step_utterance,
-                source="sequence_step",
-                record_plan=False,
+        for step_idx, (step_utterance, command) in enumerate(commands):
+            self.log(
+                f"sequence step {step_idx + 1}/{len(commands)}: "
+                f"{step_utterance!r} ({command.kind})"
             )
-            results.append(self.result_summary(result))
+            result_text = self.turn_orchestrator.execute_command(self, command)
+            results.append(str(result_text))
 
         step_labels = " → ".join(utterance_steps)
         return f"PROCEDURE COMPLETE ({step_labels})\n" + "\n---\n".join(results)

@@ -46,6 +46,8 @@ EVAL_SPECS: list[dict[str, object]] = [
     # ── intent fidelity ───────────────────────────────────────────────────────
     {"file": "intent_fidelity_cache_probe.py", "suites": ["architecture", "cleanup"]},
     {"file": "intent_fidelity_concept_probe.py", "suites": ["architecture"]},
+    {"file": "intent_fidelity_llm_decompose_sequence_probe.py", "suites": ["architecture", "llm_path"]},
+    {"file": "intent_fidelity_llm_mixed_sequence_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_llm_motor_sequence_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_llm_operator_matrix_probe.py", "suites": ["architecture", "llm_path"]},
     {"file": "intent_fidelity_llm_path_parity_probe.py", "suites": ["architecture", "llm_path"]},

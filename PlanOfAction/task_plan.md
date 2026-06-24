@@ -71,8 +71,13 @@ The 13B.1 freshness work has since been connected to the live hot path:
 - passable-cell belief persists across look-away but expires through the same step-based TTL
   instead of accumulating forever.
 
-This is a deliberate partial implementation. Uniform decay, intra-task storage, the mission clock,
-and the separate Sense-side occupancy decay site remain explicit debt documented in
+The later claim-unification pass collapsed `ObservationClaim`/`ExecutionClaim` into the single
+`ClaimRecord` type and moved the cortex belief loop onto one mission-scoped store
+(`OperationalMemory.claims`) shared with the `RepresentationStore`, closing the intra-task-storage
+and mission-clock debt: belief now persists across `run_episode` task runs and decays across a
+mission, while a new task targeting a different object stales the prior grounding observations
+through the freshness model rather than contaminating the new target. Uniform decay and the
+separate Sense-side occupancy decay site remain explicit debt documented in
 [blueprint.md](blueprint.md#freshness-decay--known-debt-phase-13b-claim-decay-on-the-cortex-loop)
 and in the 13B.1 record below.
 
@@ -110,7 +115,7 @@ claim decay:
 - `python evals/eval_master.py --suite cleanup`: **30/30**
 - `python evals/eval_master.py --suite llm_path`: **5/5**
 - `python evals/eval_master.py --suite live_llm`: **1/1** when a live backend is configured
-- `python -m pytest -q tests`: **355 passed**, 1 warning, 12 subtests passed
+- `python -m pytest -q tests`: **366 passed**, 1 warning, 12 subtests passed
 
 The deterministic gate runs without the live LLM key. The `live_llm` lane is opt-in and is not
 part of the offline release gate.
@@ -855,11 +860,59 @@ rather than duplicating its current value.
 
 **Deliberate debt:**
 
-- uniform observation decay rate;
-- intra-task Cortex claim store;
-- mission clock depends on live adapter continuity;
-- occupancy belief decays in Sense because planning consumes it before Cortex, leaving two decay
-  sites until claim storage is unified.
+- uniform observation decay rate (still open);
+- occupancy belief decays in Sense because planning consumes it before Cortex, leaving a second,
+  Sense-side decay site (still open — deliberately deferred by the claim-unification pass below).
+
+The intra-task Cortex claim store and the mission-clock dependency were **closed by claim
+unification** (see the record below).
+
+### Claim Unification — One Claim Type, One Mission-Scoped Store
+
+Status: **complete**.
+
+**Pressure:** two claim types (`ObservationClaim` hot-path, `ClaimRecord` representation) and two
+stores (cortex `_claims` rebuilt per task, `RepresentationStore._claims`) duplicated the claim
+custody model and made the intra-task-decay and mission-clock debt unfixable: belief was
+reconstructed per `run_episode`, so decay could not span a mission.
+
+**Decision:** the systemic unit is the store, not just the type. `ClaimRecord` becomes the single
+claim type; the hot-path belief store and the representation store become one mission-scoped store
+on `OperationalMemory.claims`, shared by reference. Belief is cleared only on a typed reset.
+`ExecutionClaim` was dead and was deleted (folded by deletion; `kind="execution"` remains in the
+enum).
+
+**Implementation:**
+
+- `ClaimRecord` gained `last_observed_tick`; cortex observations are authored as
+  `kind="observation"`, `scope="grounding"`, `authority="sense"`;
+- `OperationalMemory.claims` is the one store; `Cortex._claims` and `RepresentationStore._claims`
+  are properties over it (same dict);
+- `reset_episode` clears the store only on the typed-reset path
+  (`clear_reference_context=True`); task admission preserves belief;
+- the decay loop is **kind-aware** — only observations age, so durable claims (operator
+  assertions, facts, procedures) sharing the store never decay from look-away (the merge's safety
+  property);
+- a new task whose resolved target context differs stales the prior grounding observations
+  (they carry a `target_context` provenance stamp), preventing different-target contamination
+  while preserving same-target continuity ("repeat the last task");
+- prewarm warms the `{step}:idle` variants a warm start can begin on, so retained belief never
+  forces a compile in the rendered loop.
+
+**Regressions surfaced and fixed while testing:**
+
+- different-target tasks on one session read the prior task's residual `target_location`
+  (`go to the red door` then `go to the farthest door`) — fixed by grounding-context staling;
+- a warm-start first tick landed on a non-`locate_object` step whose `:idle` sense template was
+  unwarmed, causing one render-loop compile — fixed by prewarm warm-start coverage.
+
+**Acceptance:** `tests/test_claim_unification.py` pins the unified type, the single store, the
+typed-reset boundary, the durable-claim safety property, and grounding-context staling.
+`evals/claim_custody_typed_claims_probe.py` was rewritten to assert the unified type (it had
+pinned the now-reversed `ObservationClaim` duplication). Full gate green:
+`pytest` 366, `eval_master` 78/78, orpi 10/10, cleanup 30/30, llm_path 5/5.
+
+**Carry:** uniform decay and the Sense-side occupancy decay site remain (above).
 
 ### 13B.2 - Native MiniGrid FOV And Eval Lanes
 

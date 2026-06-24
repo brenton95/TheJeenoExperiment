@@ -70,9 +70,9 @@ flowchart TD
   Substrate --> SenseHow
   SenseHow --> Observation
   SenseHow --> SpatialBelief["Retained spatial belief<br>passable cells persist with TTL<br>targets refresh only while observed"]
-  SpatialBelief --> Observation["ObservationClaim<br>last observed + source + confidence<br>freshness framing"]
-  Observation --> Decay["Claim decay<br>current / unverifiable / stale / unknown"]
-  Decay --> KnowledgeWrite["Representation surface<br>record evidence + provenance"]
+  SpatialBelief --> Observation["ClaimRecord (kind=observation)<br>last observed + source + confidence<br>freshness framing"]
+  Observation --> Decay["Claim decay<br>current / unverifiable / stale / unknown<br>one mission-scoped store; observations only"]
+  Decay --> KnowledgeWrite["Representation surface<br>shares the one ClaimRecord store"]
   KnowledgeWrite --> Snapshot
 
   Gate -->|memory update| MemoryTicket["MemoryWriteTicket"]
@@ -88,7 +88,7 @@ flowchart TD
   Contract --> Spine["Spine<br>execute contract only"]
   Spine --> ActionHow["SubstrateAdapter<br>action/planner/controller HOW"]
   Substrate --> ActionHow
-  ActionHow --> ExecClaim["ExecutionReport / ExecutionClaim<br>result + provenance"]
+  ActionHow --> ExecClaim["ExecutionReport<br>result + provenance"]
   ExecClaim --> RuntimeLoop
   ExecClaim --> KnowledgeWrite
   RuntimeLoop -->|mission terminal| Result

@@ -14,8 +14,10 @@ No spatial map yet (Step 3). The point here is to prove decay transitions a clai
 on the real loop, against the pure-function contract pinned by
 ``evals/claim_custody_unverifiable_freshness_probe.py``.
 
-Decay is intra-task and uniform across kinds by deliberate, flagged debt — see the
-``# TECH-DEBT(...)`` tags in jeenom/cortex.py.
+Belief is now mission-scoped (the single ``memory.claims`` store, cleared only on
+typed reset), so decay spans a mission rather than being rebuilt per task. Decay
+remains uniform across kinds by deliberate, flagged debt — see the
+``# TECH-DEBT(uniform-decay)`` tag in jeenom/cortex.py.
 """
 from __future__ import annotations
 

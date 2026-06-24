@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .schemas import MemoryUpdate, SceneModel
+from .schemas import ClaimRecord, MemoryUpdate, SceneModel
 
 
 class OperationalMemory:
@@ -57,6 +57,12 @@ class OperationalMemory:
 
         self.scene_model: SceneModel | None = None
 
+        # The single mission-scoped claim store. Both the per-task Cortex belief
+        # loop and the station's RepresentationStore read/write this one dict, so
+        # belief survives across run_episode task runs and is cleared only on the
+        # typed-reset path (reset_episode(clear_reference_context=True)).
+        self.claims: dict[str, ClaimRecord] = {}
+
         self.episodic_memory = {
             "known_target_location": None,
             "last_world_sample": None,
@@ -95,6 +101,11 @@ class OperationalMemory:
 
     def reset_episode(self, *, clear_reference_context: bool = True) -> None:
         self.scene_model = None
+        # Belief is mission-scoped: task admission (clear_reference_context=False)
+        # preserves the claim store; only a typed reset (the episode boundary)
+        # clears it.
+        if clear_reference_context:
+            self.claims = {}
         last_target = None
         last_task = None
         last_successful_instruction = None
