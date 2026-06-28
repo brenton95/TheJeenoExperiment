@@ -552,3 +552,88 @@ the kernel-required vs. substrate-optional method boundary is implicit.
   implement. Alternatively, make the operator station's utterance classifier
   check `hasattr` before calling substrate-optional methods.
 - **Status:** documented. Revisit when a non-golden-path AI2-THOR eval is built.
+
+### F13 — Grounding→execution handoff assumes color-unique targets; colorless substrates lose target identity (kernel)
+
+The ranked grounding pipeline correctly selects the nearest (or farthest) object
+via `_compose_extreme_task`. However, the selected entry's coordinates are
+discarded when the station generates a task instruction: `_task_command_for_entry`
+calls `domain_helper.task_utterance_for_entry(entry)`, which produces a
+color+object_type string (e.g. "go to the red door"). On MiniGrid, color is
+always present and unique per object type, so sense can re-resolve the correct
+target. On AI2-THOR, apples are colorless — the utterance becomes "go to the
+apple" with no discriminator, and sense picks the last-iterated object
+(`ai2thor_sense.py:115-118`, last-write-wins), which is typically the *wrong*
+target.
+
+Three independent mechanisms prevent coordinates from threading through:
+
+1. `_task_command_for_entry` (`operator_station.py:3727-3728`) generates a
+   natural-language utterance, not a parameterised command. Coordinates are not
+   part of the utterance.
+2. `compose_known_task` (`operator_station.py:5180-5192`) creates a `TaskRequest`
+   with `target_location=None` — coordinates from the grounded entry are not
+   forwarded.
+3. `cortex.py:193` unconditionally overwrites `target_location` from sense
+   claims, so even if task params carried coordinates they would be discarded.
+
+The combined effect: for colorless substrates (or any substrate with
+non-color-unique objects of the same type), the grounding pipeline selects the
+right target but the execution pipeline navigates to an arbitrary one.
+
+- **Surfaced by:** plan 011 eval — "go to the nearest apple" with two colorless
+  apples at different distances. Grounding returns the near apple as `[0]`;
+  execution navigates to the far apple.
+- **Severity:** kernel-level. No adapter-level workaround exists — all three
+  coordinate-dropping mechanisms are in shared/kernel code.
+- **Invariant violated:** the kernel implicitly assumes that
+  `task_utterance_for_entry` produces an utterance with enough discriminating
+  information (color) for sense to re-resolve the same target. This holds on
+  MiniGrid (color-unique objects) but fails on AI2-THOR (colorless objects).
+- **Triage for Phase 15:** the kernel must thread grounded target identity
+  (coordinates or object ID) through the execution path so sense can select the
+  correct object without relying on color uniqueness. Options include: (a) add
+  `target_location` to `TaskRequest` and have cortex prefer it over sense
+  claims when present; (b) add an object ID / coordinate discriminator to the
+  task utterance; (c) pass the grounded entry directly to sense via
+  `execution_context.params`, bypassing the utterance→re-resolution path.
+- **Status:** documented. Blocks plan 011 eval (specific-target assertion
+  unreachable at adapter scope). The grounding adapter work (plan 011a) is
+  correct and complete — the gap is in the kernel's execution handoff.
+
+#### F13 addendum — adapter/kernel split (verified by runtime dump, 2026-06-28)
+
+Probed whether the fix can live in sense (adapter), per the owner's standing
+ruling that object identity should be a *perceived fact reported by sense*, not
+kernel vocabulary. Runtime dump of `Ai2thorSense.tick` on the two-apple
+superlative path (011a fix confirmed live):
+
+- `execution_context.params` = `{'color':'', 'object_type':'apple', 'target_location': None}`
+  — the channel sense reads (`ai2thor_sense.py:61-64`) **exists**, but the grounded
+  coordinates arrive as `None`. Only `object_type` survives.
+- `execution_context` exposes **only** `active_skill` and `params` — it does NOT
+  expose the station's `active_claims` / `last_grounded_target` to sense.
+- `active_claims is None` after the run — `_compose_extreme_task` /
+  `_task_command_for_entry` never call `_set_last_grounded_claim` (only
+  `_format_extreme_answer` does), so the selection isn't even recorded as a claim.
+- Confirmed at source: `task_utterance_for_entry(entry@x=0.5,y=0.5)` → `'go to the apple'`
+  (coordinates dropped — mechanism #1).
+
+**The work splits cleanly across the adapter/kernel line:**
+- **Matching** (pick the right apple given the selection) — CAN live in **sense
+  (adapter)**, owner-aligned. Sense already reads `params` and already holds every
+  object's `(ox, oy)`; given the selected coords it would match nearest-to-selection
+  instead of last-write-wins (`ai2thor_sense.py:115-118`).
+- **Population** (deliver the selection to sense, and stop it being clobbered) — is
+  the **kernel** step. No channel carries the selection to sense today; this is
+  mechanisms #1/#2/#3, all shared code.
+
+**Reframed decision for the owner (NOT "was F13 wrong"):** *Is adding one
+selection-bearing field through the execution context — `params.target_location`
+populated from the grounded entry, preserved by cortex when present — a kernel edit
+or adapter plumbing?* It is a small, surgical kernel edit that **enables** the
+adapter-side (sense) fix. Both halves exist; the split is the design call.
+Spec option (a)+(c) combined is the minimal form. This is a Phase-15 / owner
+decision, not a STOP-everything. **F13 is independent of any live-substrate run —
+it fails identically on mock, Colab, and native (the coords are dropped before any
+controller is involved).** Probe artefact: `scratchpad/f13_adapter_vs_kernel_probe.md`.

@@ -16,3 +16,6 @@ venv/
 
 # Ignore agent scratch / working files (plans, notes) — never enters a PR
 .agent/
+
+# Ignore Colab run logs / scratch output — never enters a PR
+collab_logs/
