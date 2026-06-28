@@ -65,6 +65,8 @@ class Ai2thorOperationalContext(OperationalContext):
                 "ranked_claims_output": "active_claims.ranked_scene_objects",
                 "capability_handles": {
                     "task_go_to_object": "task.go_to_object.{object_type}",
+                    "ranked": "grounding.all_{object_type_plural}.ranked.euclidean.agent",
+                    "closest": "grounding.closest_{object_type}.euclidean.{reference}",
                 },
                 "rankable_relations": ["closest", "farthest"],
                 "tie_policy": "clarify_or_display",

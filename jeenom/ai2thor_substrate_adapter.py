@@ -5,9 +5,14 @@ from typing import Any
 
 from .ai2thor_domain_helper import Ai2thorDomainHelper
 from .ai2thor_operational_context import Ai2thorOperationalContext
+from .ai2thor_primitive_library import (
+    AI2THOR_GROUNDING_PRIMITIVES,
+    ground_all_apples_ranked_euclidean,
+)
 from .capability_registry import (
     CapabilityRegistry,
     PrimitiveManifest,
+    _manifest_spec,
     _top_level_task_capability,
 )
 from .ai2thor_sense import Ai2thorSense
@@ -17,30 +22,47 @@ from .llm_compiler import CompilerBackend
 from .memory import OperationalMemory
 from .orpi import OrpiManifest
 from .plan_cache import PlanCache, procedure_key
-from .primitive_library import TASK_PRIMITIVES
+from .primitive_library import (
+    CLAIMS_FILTER_PRIMITIVES,
+    GROUNDING_PRIMITIVES,
+    SENSING_PRIMITIVES,
+    TASK_PRIMITIVES,
+)
 from .schemas import ExecutionContext
 
 
 def _ai2thor_manifest_dict() -> dict[str, Any]:
+    primitives: list[dict[str, Any]] = [
+        _top_level_task_capability(
+            name="task.go_to_object.apple",
+            description=(
+                "Run the go_to_object recipe for a grounded apple target."
+            ),
+            inputs=["target.object_type", "target_location"],
+            outputs=["task_complete", "execution_report"],
+            side_effects=["moves_agent"],
+            implementation_status="implemented",
+            runtime_binding=None,
+            safety_class="actuation",
+            authority_level="operator",
+            failure_modes=["no_path_found", "target_missing"],
+            validation_hooks=["ai2thor_env_action_preflight"],
+        ),
+    ]
+    _all_grounding = {**GROUNDING_PRIMITIVES, **AI2THOR_GROUNDING_PRIMITIVES}
+    for layer, library in (
+        ("task", TASK_PRIMITIVES),
+        ("grounding", _all_grounding),
+        ("sensing", SENSING_PRIMITIVES),
+        ("claims", CLAIMS_FILTER_PRIMITIVES),
+    ):
+        primitives.extend(
+            _manifest_spec(layer=layer, source_name=name, spec=spec)
+            for name, spec in sorted(library.items())
+        )
     return {
         "name": "ai2thor_primitive_registry_v1",
-        "primitives": [
-            _top_level_task_capability(
-                name="task.go_to_object.apple",
-                description=(
-                    "Run the go_to_object recipe for a grounded apple target."
-                ),
-                inputs=["target.object_type", "target_location"],
-                outputs=["task_complete", "execution_report"],
-                side_effects=["moves_agent"],
-                implementation_status="implemented",
-                runtime_binding=None,
-                safety_class="actuation",
-                authority_level="operator",
-                failure_modes=["no_path_found", "target_missing"],
-                validation_hooks=["ai2thor_env_action_preflight"],
-            ),
-        ],
+        "primitives": primitives,
     }
 
 
@@ -70,6 +92,9 @@ class Ai2thorSubstrateAdapter:
         self._capability_registry: CapabilityRegistry = CapabilityRegistry(
             PrimitiveManifest.from_dict(_ai2thor_manifest_dict())
         )
+        self._capability_registry._synthesized_callables[
+            "grounding.all_apples.ranked.euclidean.agent"
+        ] = ground_all_apples_ranked_euclidean
         self._orpi_manifest: OrpiManifest = OrpiManifest.from_context_and_registry(
             self.operational_context,
             self._capability_registry,
