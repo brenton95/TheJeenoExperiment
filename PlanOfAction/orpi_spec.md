@@ -6,7 +6,9 @@ ossify the wrong abstractions; v0.1 exists to be broken by the second substrate,
 
 This document is the authoritative contract/manifest/procedure/trace reference for ORPI. It is built
 and versioned alongside the code. It does not track current phase status; the implementation
-roadmap lives in [task_plan.md](task_plan.md).
+roadmap lives in [task_plan.md](task_plan.md). The chronological Phase 12 implementation record,
+including the decisions and discoveries summarized below, lives in
+[task_plan.md](task_plan.md#phase-12---orpi-v01).
 
 ---
 
@@ -685,3 +687,118 @@ class JEENO exists to prevent). Fix = make the handle type-neutral
 type-aware. Defer to Phase 15 with F14. **Note:** this means the apple→garbagecan
 swap does NOT require renaming the handle — resolution is metric-keyed, so the
 existing `all_apples` handle resolves a garbagecan ranking unchanged.
+
+## 12. Design And Implementation History
+
+This section preserves why ORPI v0.1 has its current shape. It is not a roadmap.
+
+### Why ORPI Has An Inbound And Outbound Half
+
+The first design pressure was not only "how does cognition call a robot?" A retrofit cognition
+layer also needs to explain and learn from deployment:
+
+- what the operator intended;
+- which claims were used;
+- which capability contracts were considered;
+- what authority was granted;
+- what executed;
+- whether effects were verified;
+- which component owned a failure.
+
+An inbound-only primitive interface would leave that audit and supervision story to ad hoc logs.
+`LabelledEpisode` therefore belongs to the interface standard rather than being an optional
+analytics layer.
+
+### Why Contracts Are More Than Capability Names
+
+Earlier readiness logic could treat a present/implemented primitive as executable even when its
+frames, claims, authority, validation hooks, or safety policy were not satisfied. ORPI retains the
+full contract because:
+
+- availability is not feasibility;
+- feasibility is not authority;
+- execution is not verified success;
+- a failure mode is a typed outcome, not merely a false postcondition.
+
+The contract is intentionally object/effect-centric. "Door state changed from closed to open" is
+portable; "joint trajectory 17 ran" is embodiment detail.
+
+### Why The Legacy Taxonomy Bridge Remains
+
+The implementation already grouped primitives as task, grounding, sensing, action, and claims.
+Forcing every authoring site to switch immediately to `sense | actuation | meta` would have mixed
+interface extraction with a repository-wide migration before a second substrate could validate
+the taxonomy.
+
+The accepted sequence was:
+
+1. project the legacy layers into the ORPI taxonomy at the interface;
+2. enforce contracts, manifests, cadence, traces, and conformance;
+3. let the second substrate expose mismatches;
+4. freeze and migrate authoring vocabulary only after the interface survives.
+
+### Why Procedures Are Interface Objects But Not A New Hierarchy
+
+Substrates and OEMs already possess vouched-for recipes. Treating them only as local cache entries
+would hide valuable capability, while creating a new procedure system would duplicate
+`ProcedureRecipe` and plan-cache machinery.
+
+`OrpiProcedure` is therefore a serialized interface view. It can be selected by declared
+postcondition, but expands to primitive handles before readiness and ticket issuance. Procedure
+selection never bypasses primitive-level authority.
+
+### Phase 12D Consolidation Discoveries
+
+The consolidation pass separated two problems that had been conflated:
+
+- **substrate coupling:** critical to a second-substrate proof;
+- **station bloat:** operational debt, but not a blocker for steering or interface validity.
+
+The leak audit classified sites on two axes:
+
+| Axis | Meaning |
+|---|---|
+| cheap vs structural | whether removal is surgical or changes a real boundary |
+| curriculum-touching vs not | whether Phase 13 would build new behavior on top of the leak |
+
+Curriculum-touching leaks were pulled forward. Non-curriculum leaks were allowed to remain for
+Phase 14. Structural station extraction stayed parked behind the decomposition design.
+
+Two cheap leaks were removed during consolidation:
+
+- MiniGrid grounding primitives moved out of the generic primitive library;
+- ranked request-plan step ids became context/pluralization driven.
+
+### Trace Completion And Remaining Verification Debt
+
+Phase 12D closed the highest-value trace gaps:
+
+- failure categories map to the ORPI attribution taxonomy while retaining the raw category;
+- named `postcondition_primitive` checkers are invoked and recorded;
+- degenerate boolean verification is labelled honestly.
+
+Rich predicted-delta versus re-observed-state verification remains incomplete. It depends on
+runtime outcome normalization and post-action evidence, and is intentionally coupled to the
+mission-termination/action-outcome work rather than being simulated by trace formatting alone.
+
+### Knowledge-Scope Discovery
+
+`universal` scope exists but is rarely earned by current MiniGrid plans because they name concrete
+primitive handles. Real universal transfer requires plans expressed in effect/postcondition
+vocabulary across more than one embodiment. The second-substrate port is the proof event; a
+synthetic MiniGrid fixture only proves the derivation mechanism exists.
+
+### Conformance Philosophy
+
+The v0.1 probes intentionally enforce the most important invariants now:
+
+- manifest-at-init;
+- contract coverage;
+- valid cadence/mode combinations;
+- no deliberative meta-primitive in compiled runtime plans;
+- OEM-only bundled procedures;
+- labelled episode emission;
+- scope-gated knowledge writes.
+
+More expensive whole-program static checks are deferred until v1, when a second substrate makes
+their cost worthwhile and provides a real counterexample set.

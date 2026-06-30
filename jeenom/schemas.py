@@ -2649,6 +2649,8 @@ class ObservationClaim:
     level: str = "command"        # "primitive" | "command"
     confidence: float = 1.0
     scope: str = "grounding"
+    freshness: str = "current"    # current | unverifiable | stale | unknown
+    last_observed_tick: int | None = None  # step_count when last observed in-view
 
 
 @dataclass

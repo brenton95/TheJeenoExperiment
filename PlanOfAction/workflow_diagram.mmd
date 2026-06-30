@@ -4,17 +4,18 @@ config:
 ---
 %% High-level architecture overview.
 %% Roadmap status lives only in task_plan.md; flow_of_control.mmd has the detailed turn flow.
+%% Decision history and completed phase detail also live in task_plan.md.
 flowchart LR
 
   OP["OperatorStation<br>operator I/O + session"]
   MSG["Typed Message Gate<br>schemas only"]
 
   subgraph RUN["Runtime package"]
-    CTX["OperationalContext<br>WHERE / MEANING"]
-    SUB["SubstrateAdapter<br>concrete HOW bindings"]
+    CTX["OperationalContext<br>WHERE / MEANING<br>vocabulary + handle templates + claim/display policy"]
+    SUB["SubstrateAdapter<br>concrete HOW bindings<br>one live episode until explicit reset"]
   end
 
-  REG["CapabilityRegistry<br>contracts + context task families"]
+  REG["CapabilityRegistry<br>exact manifest handles + context task families<br>vocabulary is not capability"]
   FP["Context fingerprint<br>cache / reuse boundary"]
   SLICE["Compact context slice<br>LLM only when needed"]
   TEST["Architecture + LLM-path eval ladder<br>same typed flow under paraphrases"]
@@ -27,12 +28,17 @@ flowchart LR
     IC["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
     LLM["Default semantic router<br>strict JSON-schema OperatorIntent"]
     FB["Deterministic compiler fallback<br>visible degraded-availability path"]
-    CX["Cortex + IntentVerifier<br>normalize, plan, repair, synthesize, ask"]
-    MC["MissionCortex<br>MissionContract + validated procedure<br>capabilities / params / lineage"]
+    CX["Cortex + IntentVerifier<br>normalize with semantic preservation<br>plan, repair, synthesize, ask"]
+    MC["MissionCortex<br>MissionContract + validated procedure<br>conditions / capabilities / params / lineage"]
     RG["ReadinessGraph<br>execute / ask / refuse / gather evidence"]
-    REP["Representation surface<br>current claims + durable knowledge<br>procedures + provenance"]
-    SE["Sense<br>evidence requests -> observation claims"]
+    REP["Representation surface<br>current / stale / unverifiable claims<br>durable knowledge + procedures + provenance"]
+    SE["Sense<br>native observations + retained spatial belief<br>-> freshness-aware claims"]
     SP["Spine<br>execution contracts -> execution claims"]
+  end
+
+  subgraph FUTURE["Planned 13B boundaries"]
+    POLICY["Typed termination policy<br>success / blocked / impossible / interrupted / budget exhausted"]
+    SEARCH["Bounded evidence-gathering policy<br>search authority + budget"]
   end
 
   CTX --> REG
@@ -49,7 +55,7 @@ flowchart LR
   SLICE -. "only for compile / repair / synthesis" .-> LLM
   TO -->|compound mission| MC
   TO -->|simple request| RG
-  MC -->|RequestPlan + provenance| RG
+  MC -->|RequestPlan + condition provenance| RG
   REG --> RG
   FP --> RG
   REP -->|claim/procedure snapshot| RG
@@ -67,7 +73,7 @@ flowchart LR
   MSG -->|authorize runtime entry| CX
   CX -->|EvidenceFrame| MSG
   MSG --> SE
-  CX -->|one ExecutionContract after fresh evidence| MSG
+  CX -->|one ExecutionContract after fresh evidence<br>and a failed success check| MSG
   MSG --> SP
   SP -->|action HOW| SUB
   SUB -->|execution result| SP
@@ -79,6 +85,8 @@ flowchart LR
   MSG --> REP
 
   REP -->|updated snapshot| CX
+  MC -. "will delegate terminal authority" .-> POLICY
+  POLICY -. "may authorize evidence gathering" .-> SEARCH
 
   TEST -. "low-level Sense paraphrases" .-> SE
   TEST -. "low-level Spine paraphrases" .-> SP
@@ -90,3 +98,6 @@ flowchart LR
   MSG -->|CommandResult projected by CommandAuthority.record_result| EP
   CONF -. "gates contract boundary" .-> ORPI
   CONF -. "turn round-trips to valid trace" .-> EP
+
+  classDef future stroke-dasharray: 5 5,fill:#fff,stroke:#777,color:#333
+  class POLICY,SEARCH future

@@ -4,12 +4,13 @@ config:
 ---
 %% Detailed current turn/runtime flow.
 %% Roadmap status lives only in task_plan.md.
+%% Decision history and completed phase detail also live in task_plan.md.
 flowchart TD
 
   Runtime["Runtime package<br>SubstrateAdapter + OperationalContext"]
-  Context["OperationalContext<br>domain meaning schema"]
-  Substrate["SubstrateAdapter<br>concrete HOW"]
-  Registry["CapabilityRegistry<br>contracts filtered by context"]
+  Context["OperationalContext<br>domain meaning + object vocabulary<br>handle templates + claim/display policy"]
+  Substrate["SubstrateAdapter<br>concrete HOW<br>one live episode until explicit reset"]
+  Registry["CapabilityRegistry<br>exact manifest authority<br>filtered by context"]
   Fingerprint["Context fingerprint<br>cache/reuse boundary"]
   Cache["Plan/template cache<br>keyed by context fingerprint"]
   Slice["Compact context slice<br>only when LLM needs it"]
@@ -25,14 +26,15 @@ flowchart TD
   IntentCache["Bounded deterministic routes<br>controls / continuations / exact compatibility patterns"]
   LLM["Default semantic router<br>LLM strict JSON-schema OperatorIntent"]
   Fallback["Deterministic compiler fallback<br>visible degraded-availability path"]
-  Normalize["Deterministic normalization + IntentVerifier<br>canonical vocabulary / semantic preservation"]
+  Normalize["Deterministic normalization + IntentVerifier<br>context-bound schema / semantic preservation"]
   Intent["OperatorIntent<br>fast or slow path merge here"]
   Dispatch["TurnOrchestrator.dispatch<br>5 knowledge_type paths<br>claim / procedure / provenance / action / control"]
   Mission["MissionCortex<br>MissionContract + validated procedure<br>capabilities / params / lineage"]
   Plan["Cortex<br>build RequestPlan"]
-  Snapshot["Representation / Knowledge snapshot<br>current claims + durable procedures"]
+  Snapshot["Representation / Knowledge snapshot<br>current / stale / unverifiable claims<br>durable procedures"]
   Ready["ReadinessGraph<br>context + contracts + claims + authority"]
   Gate["ApprovedCommand"]
+  Reset["Explicit reset command<br>close adapters + clear episode state<br>open fresh seeded environment"]
 
   Runtime --> Context
   Runtime --> Substrate
@@ -63,11 +65,14 @@ flowchart TD
   Gate -->|ask / clarify / refuse / answer| Result["CommandResult<br>with provenance"]
   Result --> End["Await next steering"]
 
-  Sense["Sense<br>architecture WHAT"]
+  Sense["Sense<br>architecture WHAT<br>native substrate FOV"]
   Sense --> SenseHow["SubstrateAdapter<br>sensing HOW"]
   Substrate --> SenseHow
-  SenseHow --> Observation["ObservationClaim<br>source + confidence + freshness"]
-  Observation --> KnowledgeWrite["Representation surface<br>record evidence + provenance"]
+  SenseHow --> Observation
+  SenseHow --> SpatialBelief["Retained spatial belief<br>passable cells persist with TTL<br>targets refresh only while observed"]
+  SpatialBelief --> Observation["ObservationClaim<br>last observed + source + confidence<br>freshness framing"]
+  Observation --> Decay["Claim decay<br>current / unverifiable / stale / unknown"]
+  Decay --> KnowledgeWrite["Representation surface<br>record evidence + provenance"]
   KnowledgeWrite --> Snapshot
 
   Gate -->|memory update| MemoryTicket["MemoryWriteTicket"]
@@ -76,7 +81,7 @@ flowchart TD
   OperatorClaim --> Result
 
   Gate -->|task executable| ExecTicket["ExecutionTicket<br>authorizes mission/runtime entry"]
-  ExecTicket --> RuntimeLoop["Cortex runtime loop<br>fresh sense → evaluate mission condition<br>→ choose at most one skill"]
+  ExecTicket --> RuntimeLoop["Cortex runtime loop<br>fresh sense → evaluate success condition<br>→ choose at most one skill only if unmet"]
   RuntimeLoop -->|EvidenceFrame| Sense
   Observation --> RuntimeLoop
   RuntimeLoop --> Contract["ExecutionContract<br>one approved skill"]
@@ -87,6 +92,11 @@ flowchart TD
   ExecClaim --> RuntimeLoop
   ExecClaim --> KnowledgeWrite
   RuntimeLoop -->|mission terminal| Result
+
+  Termination["Planned 13B.6<br>typed terminal outcome policy"]
+  Search["Planned 13B.7<br>bounded evidence-gathering policy"]
+  RuntimeLoop -. "blocked / impossible / interrupted / budget exhausted" .-> Termination
+  Termination -. "needs authorized search" .-> Search
 
   Gate -->|explicit motor| MotorTicket["RawMotorTicket"]
   MotorTicket --> Spine
@@ -100,6 +110,10 @@ flowchart TD
   Substrate -. "publishes capability contracts" .-> OrpiManifest
   OrpiManifest --> Registry
   Result -->|CommandAuthority.record_result projects trace| Episode
+  Station -->|typed reset between turns| Reset --> Substrate
   OrpiConf -. "gates contract boundary" .-> OrpiManifest
   OrpiConf -. "no deliberative meta in compiled plan" .-> Ready
   OrpiConf -. "turn round-trips to valid trace" .-> Episode
+
+  classDef future stroke-dasharray: 5 5,fill:#fff,stroke:#777,color:#333
+  class Termination,Search future

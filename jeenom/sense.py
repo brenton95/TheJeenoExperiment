@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from .claim_freshness import (
+    FRESHNESS_UNVERIFIABLE,
+    OBSERVATION_KIND,
+    ttl_for_kind,
+)
 from .plan_cache import sense_key
 from .primitive_library import SENSING_PRIMITIVES
 from .schemas import (
@@ -45,6 +50,10 @@ class MiniGridSense:
         self.memory = memory
         self.compiler = compiler
         self.plan_cache = plan_cache
+        # Per-cell passable belief: cell -> step_count when last observed passable.
+        # Intra-task (a fresh MiniGridSense is built per task episode); cells decay
+        # out via the freshness TTL rather than accumulating forever.
+        self._passable_belief: dict[tuple[int, int], int] = {}
 
     def tick(
         self,
@@ -200,11 +209,17 @@ class MiniGridSense:
             "mission": sample.mission,
             "agent_pose": sample.agent_pose,
             "target_visible": sample.target_visible,
-            "target_location": sample.target_location,
-            "target_object": sample.target_object,
             "adjacency_to_target": sample.adjacency_to_target,
             "occupancy_grid": sample.occupancy_grid,
         }
+        # in_view-aware target belief: only re-emit target_location/target_object
+        # while the target is actually in the field of view. When it leaves view we
+        # stop refreshing it, so the cortex's prior claim ages on the loop via the
+        # freshness decay machine (current -> unverifiable -> unknown) instead of
+        # being blanket-refreshed from the known_target_location memory fallback.
+        if sample.target_visible:
+            claims["target_location"] = sample.target_location
+            claims["target_object"] = sample.target_object
         return OperationalEvidence(claims=claims, confidence=1.0, source="sense")
 
     def project_to_spine(self, sample: WorldModelSample):
@@ -404,7 +419,7 @@ class MiniGridSense:
 
         width, height = sample.grid_size
         occupancy_grid = [[False for _ in range(width)] for _ in range(height)]
-        passable_positions: set[tuple[int, int]] = set()
+        observed_passable: set[tuple[int, int]] = set()
 
         for cell in self._observed_cells(sample):
             x = int(cell["x"])
@@ -419,10 +434,47 @@ class MiniGridSense:
 
             occupancy_grid[y][x] = passable
             if passable:
-                passable_positions.add((x, y))
+                observed_passable.add((x, y))
+            else:
+                # Observed non-passable now: drop any stale passable belief here.
+                self._passable_belief.pop((x, y), None)
 
         sample.occupancy_grid = occupancy_grid
-        sample.passable_positions = passable_positions
+        sample.passable_positions = self._accumulate_passable_belief(
+            observed_passable, sample.step_count
+        )
+
+    def _accumulate_passable_belief(
+        self, observed_passable: set[tuple[int, int]], tick: int
+    ) -> set[tuple[int, int]]:
+        """Return the believed-passable set: observed cells plus cells seen recently
+        enough not to have decayed out of belief.
+
+        Observed-this-tick cells refresh to ``current``; cells unseen for fewer than
+        ``UNVERIFIABLE_DECAY_STEPS`` ticks remain ``unverifiable`` (still believed);
+        cells unseen at/after the threshold decay to ``unknown`` and are dropped.
+
+        # TECH-DEBT(occupancy-decay-sites): the spatial passable belief decays here in
+        # the perception layer, via the same freshness TTL as the cortex, rather than
+        # being unified with the Step 2 cortex claim-decay loop. It must be Sense-side
+        # because the planner reads passable_positions from percepts before the cortex
+        # runs. Unifying the two decay sites onto one claim store is deferred.
+        """
+        for cell in observed_passable:
+            self._passable_belief[cell] = tick
+
+        ttl = ttl_for_kind(OBSERVATION_KIND, freshness=FRESHNESS_UNVERIFIABLE)
+        accumulated: set[tuple[int, int]] = set()
+        expired: list[tuple[int, int]] = []
+        for cell, last_tick in self._passable_belief.items():
+            steps_unseen = max(0, tick - last_tick)
+            if ttl.expired(steps_unseen=steps_unseen):
+                expired.append(cell)
+            else:
+                accumulated.add(cell)
+        for cell in expired:
+            del self._passable_belief[cell]
+        return accumulated
 
     def _find_object_by_color_type(self, sample: WorldModelSample, params) -> None:
         self._ensure_parsed_grid(sample)
