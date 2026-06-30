@@ -19,3 +19,6 @@ venv/
 
 # Ignore Colab run logs / scratch output — never enters a PR
 collab_logs/
+
+# Ignore local-only live probes / scratch evals — never enters a PR
+evals/probe_*.py

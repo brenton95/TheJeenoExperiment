@@ -379,6 +379,12 @@ world-frame convention has no place for an egocentric command target.
   MiniGrid spine already converts world `target_location` to motor primitives), or
   whether an egocentric command frame becomes a first-class kernel concept.
 - **Status:** open (forward finding; do not resolve in the boundary spike).
+- **Now the validated next milestone (2026-06-30):** the live golden path passed
+  3/3 for floor-plane navigation (apple placed on a reachable floor cell). The
+  *proper* end-to-end AI2-THOR task — "pick the apple off the counter" — is exactly
+  this F6 manipulation capability: it needs height (have it) + a reach/standoff
+  success notion + body-relative arm commands. That is the next capability to
+  design (owner call), distinct from the now-proven navigation.
 
 ### F7 — Compiler hardcodes `door`/`key` object types; non-MiniGrid objects don't compile (compiler)
 
@@ -637,3 +643,45 @@ Spec option (a)+(c) combined is the minimal form. This is a Phase-15 / owner
 decision, not a STOP-everything. **F13 is independent of any live-substrate run —
 it fails identically on mock, Colab, and native (the coords are dropped before any
 controller is involved).** Probe artefact: `scratchpad/f13_adapter_vs_kernel_probe.md`.
+
+### F14 — No public API to register a callable for an already-`implemented` primitive (kernel)
+The AI2-THOR adapter dispatches its ranked-grounding primitive via a callable it
+must place in `CapabilityRegistry._synthesized_callables`. The only public writer
+to that dict is `register_synthesized(handle, fn)`, which by design refuses any
+spec whose `implementation_status` is not `"synthesizable"` (it exists for the
+runtime synthesizable→implemented promotion path). The AI2-THOR primitive is
+registered `"implemented"` from the start, so `register_synthesized` returns
+`False` and silently no-ops. With no public path, the adapter writes the private
+dict directly:
+```python
+self._capability_registry._synthesized_callables[
+    "grounding.all_apples.ranked.euclidean.agent"
+] = ground_all_apples_ranked_euclidean
+```
+This is **not a drift bug** — the spec is already present in `manifest.primitives`
+as `implemented` (verified); only the callable is added, and nothing desyncs. It
+is an **encapsulation gap**: an adapter reaches past the registry's public surface
+because the registry assumes implemented primitives are dispatched via
+`runtime_binding`, not via a python callable. MiniGrid does not hit this (it
+registers no python grounding callable this way — confirm the intended pattern in
+Phase 15). Clean fix = a public registry method to bind a callable to an
+implemented handle — a **kernel edit**, deferred to Phase 15. Same family as F15
+(name says X, code does Y).
+
+### F15 — Ranked-grounding handle name carries an object type the resolver ignores (handle convention)
+The AI2-THOR ranked handle is named `grounding.all_apples.ranked.euclidean.agent`,
+and `Ai2thorOperationalContext` templates it as
+`grounding.all_{object_type_plural}.ranked.euclidean.agent`. But the runtime never
+resolves it by object type: `CapabilityRegistry.ranked_handle_for(metric)` scans
+registered grounding primitives for the `.ranked.<metric>.` segment and matches by
+**metric only** (the object type is supplied separately, via `scene.find(object_type=...)`
+from the grounding filter). So the `apples` token in the handle is cosmetic — it
+claims a type the resolver does not enforce. Harmless today (one ranked type), but
+**latent**: register a second ranked type under the same metric and
+`ranked_handle_for("euclidean")` returns whichever it scans first, with no way to
+disambiguate by object type — a silent wrong-target risk (the Dev-Rule-5 failure
+class JEENO exists to prevent). Fix = make the handle type-neutral
+(`grounding.all_objects.ranked.<metric>.agent`) or make resolution genuinely
+type-aware. Defer to Phase 15 with F14. **Note:** this means the apple→garbagecan
+swap does NOT require renaming the handle — resolution is metric-keyed, so the
+existing `all_apples` handle resolves a garbagecan ranking unchanged.
