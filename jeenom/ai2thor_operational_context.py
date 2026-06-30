@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from .schemas import OperationalContext
 
+# Single source of truth for the object types this substrate can navigate to.
+# Both the operational-context vocabulary and the adapter manifest derive from
+# this list so they cannot drift (CLAUDE.md rule 3). Each type listed here must
+# be a single-instance, floor-reachable object in the scene (or placed onto a
+# reachable cell at episode setup) — see plan 012.
+AI2THOR_GO_TO_OBJECT_TYPES = ["apple", "tomato", "mug"]
+
 
 class Ai2thorOperationalContext(OperationalContext):
     """AI2-THOR situation frame for the boundary-test spike.
@@ -23,7 +30,7 @@ class Ai2thorOperationalContext(OperationalContext):
             context_id="ai2thor.goto-object",
             substrate_id="ai2thor",
             version="1",
-            object_vocabulary=["apple"],
+            object_vocabulary=list(AI2THOR_GO_TO_OBJECT_TYPES),
             attribute_vocabulary=[
                 "color",
                 "position",
@@ -35,9 +42,9 @@ class Ai2thorOperationalContext(OperationalContext):
                 {
                     "task_type": "go_to_object",
                     "canonical_pattern": "go to the {object_type}",
-                    "object_types": ["apple"],
+                    "object_types": list(AI2THOR_GO_TO_OBJECT_TYPES),
                     "required_attributes": ["object_type"],
-                    "capability_handle": "task.go_to_object.apple",
+                    "capability_handle": "task.go_to_object.{object_type}",
                 }
             ],
             reference_semantics={
@@ -57,7 +64,7 @@ class Ai2thorOperationalContext(OperationalContext):
             },
             grounding_semantics={
                 "visibility_model": "fully_observed_currently",
-                "object_types": ["apple"],
+                "object_types": list(AI2THOR_GO_TO_OBJECT_TYPES),
                 "attribute_values": {},
                 "attribute_aliases": {},
                 "distance_metrics": ["euclidean"],

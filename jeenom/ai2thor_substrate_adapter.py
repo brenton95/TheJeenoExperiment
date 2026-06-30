@@ -4,7 +4,10 @@ from dataclasses import asdict
 from typing import Any
 
 from .ai2thor_domain_helper import Ai2thorDomainHelper
-from .ai2thor_operational_context import Ai2thorOperationalContext
+from .ai2thor_operational_context import (
+    AI2THOR_GO_TO_OBJECT_TYPES,
+    Ai2thorOperationalContext,
+)
 from .ai2thor_primitive_library import (
     AI2THOR_GROUNDING_PRIMITIVES,
     ground_all_apples_ranked_euclidean,
@@ -32,11 +35,17 @@ from .schemas import ExecutionContext
 
 
 def _ai2thor_manifest_dict() -> dict[str, Any]:
+    # Register one go_to_object capability per object type in the adapter's
+    # vocabulary. The kernel grounds against task.go_to_object.{type} (handle
+    # generated parametrically in planning_semantics); every advertised type
+    # must have a matching implemented capability or CapabilityMatcher rejects
+    # it. Multi-type vocabulary unblocks multi-leg missions of distinct
+    # single-instance objects (plan 012). Kernel untouched.
     primitives: list[dict[str, Any]] = [
         _top_level_task_capability(
-            name="task.go_to_object.apple",
+            name=f"task.go_to_object.{object_type}",
             description=(
-                "Run the go_to_object recipe for a grounded apple target."
+                f"Run the go_to_object recipe for a grounded {object_type} target."
             ),
             inputs=["target.object_type", "target_location"],
             outputs=["task_complete", "execution_report"],
@@ -47,7 +56,8 @@ def _ai2thor_manifest_dict() -> dict[str, Any]:
             authority_level="operator",
             failure_modes=["no_path_found", "target_missing"],
             validation_hooks=["ai2thor_env_action_preflight"],
-        ),
+        )
+        for object_type in AI2THOR_GO_TO_OBJECT_TYPES
     ]
     _all_grounding = {**GROUNDING_PRIMITIVES, **AI2THOR_GROUNDING_PRIMITIVES}
     for layer, library in (

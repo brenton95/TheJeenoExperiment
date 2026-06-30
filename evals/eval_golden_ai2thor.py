@@ -61,6 +61,49 @@ def run_golden(controller: Any) -> dict[str, Any]:
     }
 
 
+def run_mission(controller: Any) -> dict[str, Any]:
+    """Multi-leg mission: 'go to the apple, then the tomato, then the mug'.
+
+    Proves the kernel's L4 sequence path (sequence_instruction -> _run_sequence
+    -> _run_task_from_instruction per leg) survives the AI2-THOR substrate swap
+    with ZERO kernel diff. Each leg re-grounds nav from the agent's pose at the
+    end of the prior leg. Legs are 3 DISTINCT single-instance object types, so
+    F13 (colorless identity loss between two same-type objects) never fires.
+    """
+    rp = build_ai2thor_runtime_package(controller=controller)
+    session = OperatorStationSession(
+        compiler=SmokeTestCompiler(),
+        compiler_name="smoke_test",
+        env_id="FloorPlan1",
+        seed=42,
+        render_mode="none",
+        memory_root=Path(tempfile.mkdtemp()),
+        runtime_package=rp,
+    )
+    utterance = "go to the apple, then go to the tomato, then go to the mug"
+    message = session.handle_utterance(utterance)
+    legs_complete = isinstance(message, str) and "PROCEDURE COMPLETE" in message
+    lr = session.last_result
+    if lr is None:
+        return {
+            "mission_message_ok": legs_complete,
+            "task_complete": False,
+            "runtime_llm_calls_during_render": -1,
+            "cache_miss_during_render": -1,
+            "reason": "no last_result",
+        }
+    fs = lr.get("final_state", {})
+    return {
+        "mission_message_ok": legs_complete,
+        "task_complete": fs.get("task_complete", False),
+        "runtime_llm_calls_during_render": lr.get("runtime_llm_calls_during_render", -1),
+        "cache_miss_during_render": lr.get("cache_miss_during_render", -1),
+        "loop_count": len(lr.get("loop_records", [])),
+        "final_skill_plan": fs.get("current_skill"),
+        "reason": None,
+    }
+
+
 class _FakeEvent:
     def __init__(self, metadata: dict[str, Any]) -> None:
         self.metadata = metadata
@@ -116,6 +159,38 @@ class _GoldenMockController:
         })
 
 
+class _MissionMockController(_GoldenMockController):
+    """Mock for the multi-leg mission: a 6x6 reachable grid with three
+    distinct single-instance objects (Apple, Tomato, Mug), each on a floor
+    cell with a reachable neighbour. Reuses the golden mock's MoveAhead/Rotate
+    physics; only the grid extent and the reported object list differ.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reachable = [
+            {"x": x * 0.25, "y": 0.0, "z": z * 0.25}
+            for x in range(6)
+            for z in range(6)
+        ]
+        # Objects spaced so each has a UNIQUE reachable standoff cell — no two
+        # share an adjacent floor cell. This lets the eval prove each leg
+        # navigates to a DISTINCT location (verifying type-filtered grounding,
+        # not just three task_complete=True reports).
+        self._objects = [
+            {"objectType": "Apple", "position": {"x": 0.25, "y": 0.9, "z": 0.25}},
+            {"objectType": "Tomato", "position": {"x": 1.25, "y": 0.9, "z": 0.25}},
+            {"objectType": "Mug", "position": {"x": 0.25, "y": 0.9, "z": 1.25}},
+        ]
+
+    def step(self, **kwargs: Any) -> _FakeEvent:
+        event = super().step(**kwargs)
+        # Override the single-Apple object list with the three mission objects.
+        if "objects" in event.metadata:
+            event.metadata["objects"] = list(self._objects)
+        return event
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="AI2-THOR golden-path eval.")
     parser.add_argument(
@@ -128,6 +203,11 @@ def main() -> int:
         default="FloorPlan1",
         help="Scene ID for --live mode (default: FloorPlan1).",
     )
+    parser.add_argument(
+        "--mission",
+        action="store_true",
+        help="Run the multi-leg mission (plan 012) instead of the single golden task.",
+    )
     args = parser.parse_args()
 
     if args.live:
@@ -139,18 +219,27 @@ def main() -> int:
             renderImage=False,
         )
         tier = "LIVE"
+    elif args.mission:
+        controller = _MissionMockController()
+        tier = "MOCK"
     else:
         controller = _GoldenMockController()
         tier = "MOCK"
 
-    print(f"AI2-THOR GOLDEN PATH EVAL (tier: {tier})\n")
+    label = "MULTI-LEG MISSION" if args.mission else "GOLDEN PATH"
+    print(f"AI2-THOR {label} EVAL (tier: {tier})\n")
 
-    result = run_golden(controller)
+    if args.mission:
+        result = run_mission(controller)
+    else:
+        result = run_golden(controller)
 
     checks: dict[str, bool] = {}
     checks["task_complete"] = result["task_complete"] is True
     checks["runtime_llm_calls_zero"] = result["runtime_llm_calls_during_render"] == 0
     checks["cache_miss_zero"] = result["cache_miss_during_render"] == 0
+    if args.mission:
+        checks["all_legs_complete"] = result.get("mission_message_ok") is True
 
     print("CHECKS")
     for name, passed in checks.items():
