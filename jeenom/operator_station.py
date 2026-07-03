@@ -171,6 +171,7 @@ _SEQUENCE_STEP_KINDS = frozenset(
     {
         "task_instruction",
         "motor_execute",
+        "motor_sequence_execute",
         "status_query",
         "ground_target_query",
         "metric_query",
@@ -1069,6 +1070,7 @@ class OperatorStationSession:
         mission_plan: MissionExecutionPlan | None = None,
     ) -> ExecutionTicket:
         task = self.compose_known_task(instruction)
+        self._stamp_target_ref(task.params)
         provenance: dict[str, Any] = {}
         parent_request_id = None
         mission_id = None
@@ -5149,6 +5151,7 @@ class OperatorStationSession:
             GroundedObjectEntry(
                 color=obj.color, x=obj.x, y=obj.y, distance=dist,
                 object_type=obj.object_type, metric=metric, provenance=provenance,
+                object_id=obj.object_id,
             )
             for dist, obj in ranked_pairs
         ]
@@ -5273,6 +5276,39 @@ class OperatorStationSession:
             query = f"which {object_type} should I use{metric_part}{reference_part}?"
         return f"No active grounding claims for that reference. First ask: {query} ({needed})."
 
+    def _stamp_target_ref(self, params: dict[str, Any]) -> None:
+        """F13: record which specific object the kernel chose, when it had one.
+
+        When grounding disambiguated among description-identical objects, the chosen
+        object lives in ``active_claims.last_grounded_target`` (with coordinates) at
+        ticket-mint time — it is nulled only once the task starts running. We stamp its
+        identity into the task params so Sense grounds *that* object instead of the
+        first description match in scan order. Only stamp when the grounded target
+        matches the task's colour+type, so a stale grounding for a different request
+        cannot mislabel this one. The re-description round-trip (MiniGrid unique
+        colours) hid this; colourless objects expose it.
+        """
+        claims = self.active_claims
+        if claims is None or not self._claims_valid_for_current_environment():
+            return
+        entry = claims.last_grounded_target
+        if entry is None:
+            return
+        task_color = params.get("color")
+        task_type = params.get("object_type")
+        if task_color is not None and entry.color != task_color:
+            return
+        if task_type is not None and entry.object_type != task_type:
+            return
+        # Identity is the adapter-minted object_id; the coord is a fallback for
+        # substrates/paths where an id is unavailable. The kernel carries the id
+        # opaquely — it does not interpret it.
+        ref: dict[str, Any] = {}
+        if entry.object_id is not None:
+            ref["object_id"] = entry.object_id
+        ref["coord"] = (int(entry.x), int(entry.y))
+        params["target_ref"] = ref
+
     def compose_known_task(self, instruction: str) -> TaskRequest:
         parsed = self.domain_helper.parse_go_to_object_utterance(instruction)
         if parsed is None:
@@ -5379,6 +5415,12 @@ class OperatorStationSession:
             )
         elif self.domain_helper.parse_go_to_object_utterance(instruction) is not None:
             task_override = self.compose_known_task(instruction)
+            # F13: the run path re-composes the known task from the instruction string,
+            # which cannot carry the chosen-object identity. Restore it from the ticket
+            # the mint stamped, so the disambiguation survives into the runtime episode.
+            ticket_ref = ticket.params.get("target_ref")
+            if ticket_ref is not None:
+                task_override.params["target_ref"] = ticket_ref
             procedure_override = self.compose_known_procedure(task_override)
             self.log(
                 "composed known task locally: "
@@ -5862,13 +5904,29 @@ class OperatorStationSession:
         validated before any executes: an uncompilable, nested, or non-executable
         step fails the whole sequence with no partial execution.
         """
+        from .llm_compiler import _parse_motor_command
+
         # Pass 1: classify every step and reject the whole sequence before running
         # any of them if a step cannot compile into an executable sequence step.
         commands: list[tuple[str, ApprovedCommand]] = []
         for step_utterance in utterance_steps:
-            command = self._classify_utterance(step_utterance)
-            if command.kind == "unresolved":
-                command = self.command_from_llm_intent(step_utterance)
+            # Motor steps are deterministically parseable; resolve them directly to a
+            # motor_execute command. This avoids re-compiling each motor phrase through
+            # the LLM (which classifies the same phrase inconsistently and can demote it
+            # to a clarification via plan readiness) — the step still mints its own
+            # RawMotorTicket at execution.
+            motor = _parse_motor_command(step_utterance)
+            if motor is not None:
+                action_name, count = motor
+                command = ApprovedCommand(
+                    command_type="motor_execute",
+                    utterance=step_utterance,
+                    payload={"action": action_name, "count": count},
+                )
+            else:
+                command = self._classify_utterance(step_utterance)
+                if command.kind == "unresolved":
+                    command = self.command_from_llm_intent(step_utterance)
             if command.kind not in _SEQUENCE_STEP_KINDS:
                 self.log(
                     f"sequence build failed: step {step_utterance!r} is not an "

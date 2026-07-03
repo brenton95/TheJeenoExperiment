@@ -101,6 +101,89 @@ def test_nested_sequence_step_rejected_before_execution():
     assert sess.last_raw_motor_ticket is None
 
 
+def test_forward_motor_step_in_sequence_executes_deterministically():
+    """A forward-motion step ('go straight twice') inside a sequence must run.
+
+    Regression: re-compiling such a step through the LLM/dispatch path classified it
+    as a motor_sequence and a plan-readiness evidence gate demoted it to a
+    clarification, breaking the sequence. Motor steps are now resolved deterministically
+    to a motor_execute command."""
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess = _make_session()
+        result = sess._run_sequence(
+            ["go straight twice", "what do you see around you"],
+            "go straight twice and tell me what you see",
+        )
+    assert "SEQUENCE ERROR" not in result
+    assert "PROCEDURE COMPLETE" in result
+    assert "MOTOR COMPLETE" in result
+    assert sess.last_raw_motor_ticket is not None  # motor authorized + executed
+
+
+def test_motor_sequence_step_is_accepted_in_sequence():
+    """A step the compiler classifies as a motor_sequence (e.g. 'go left two steps')
+    is a valid executable sequence step (runs via RawMotorTicket), not a rejected
+    nested kind."""
+    from jeenom.llm_compiler import LLMCompiler
+    from jeenom.operator_station import OperatorStationSession, _SEQUENCE_STEP_KINDS
+
+    assert "motor_sequence_execute" in _SEQUENCE_STEP_KINDS
+
+    def transport(request):
+        # The lone step 'go left two steps' compiles to a motor_sequence.
+        base = {
+            "intent_type": "motor_sequence",
+            "capability_status": "executable",
+            "required_capabilities": [],
+            "confidence": 1.0,
+            "reason": "valid motor sequence",
+            "utterance_steps": ["turn_left:2"],
+        }
+        return base
+
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess = OperatorStationSession(
+            compiler_name="llm",
+            compiler=LLMCompiler(api_key="test-key", transport=transport),
+            env_id="MiniGrid-GoToDoor-8x8-v0",
+            seed=42,
+            render_mode="none",
+            memory_root=Path(tempfile.mkdtemp()),
+        )
+        result = sess._run_sequence(["go left two steps"], "go left two steps")
+    assert "SEQUENCE ERROR" not in result
+    assert "PROCEDURE COMPLETE" in result
+
+
+def test_sequence_instruction_with_grounding_query_plan_routes_to_sequence():
+    """If a sequence_instruction also carries a grounding_query_plan (the model filled
+    one for a query sub-clause), the structural intent must win: dispatch routes it to
+    sequence execution, not single-result grounding composition (which dead-ended as
+    'ambiguous / could not compose a result from the semantic query plan')."""
+    from jeenom.schemas import OperatorIntent
+
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess = _make_session()
+        intent = OperatorIntent(
+            intent_type="sequence_instruction",
+            utterance_steps=["turn left twice", "what do you see"],
+            grounding_query_plan={"object_type": "door", "operation": "answer"},
+            capability_status="executable",
+            confidence=1.0,
+            reason="",
+        )
+        cmd = sess.turn_orchestrator.dispatch(sess, intent, "turn left twice and tell me what do you see")
+        assert cmd.kind == "sequence_execute"
+        assert cmd.payload.get("steps") == ["turn left twice", "what do you see"]
+
+        # And it orchestrates end-to-end: motor step + query step both run.
+        resp = sess.turn_orchestrator.execute_command(sess, cmd)
+    assert "could not compose" not in resp.lower()
+    assert "PROCEDURE COMPLETE" in resp
+    assert "MOTOR COMPLETE" in resp   # the motor step ran
+    assert "SCENE" in resp            # the query step ran
+
+
 def test_fallback_on_multi_intent_clarifies_instead_of_silently_dropping_steps():
     """When the LLM compile falls back and the utterance is clearly multi-step, the
     deterministic path must not silently answer just one clause (silent degradation

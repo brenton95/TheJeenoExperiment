@@ -26,6 +26,37 @@ _OPEN_STATE_PASSABLE: frozenset[str] = frozenset()
 _TRAVERSE_TO_ADJACENT: frozenset[str] = frozenset()
 
 
+def _target_ref_object_id(target_ref):
+    """Extract the adapter-minted object_id from a target_ref hint, if present.
+
+    This is the primary identity the kernel stamps when it has disambiguated among
+    description-identical objects. Sense treats it as an opaque key.
+    """
+    if not isinstance(target_ref, dict):
+        return None
+    return target_ref.get("object_id")
+
+
+def _target_ref_coord(target_ref) -> tuple[int, int] | None:
+    """Extract the disambiguating (x, y) from a target_ref hint, if present.
+
+    target_ref is a small substrate-neutral dict stamped by the kernel when it has
+    already chosen among description-identical objects. On coordinate substrates it
+    carries ``{"coord": (x, y)}``; other substrates may key on an object id, which a
+    later reader handles alongside this branch.
+    """
+    if not isinstance(target_ref, dict):
+        return None
+    coord = target_ref.get("coord")
+    if coord is None:
+        return None
+    try:
+        x, y = coord
+    except (TypeError, ValueError):
+        return None
+    return (int(x), int(y))
+
+
 def register_domain_index_maps(
     object_index: dict[int, str],
     color_index: dict[int, str],
@@ -163,6 +194,10 @@ class MiniGridSense:
                         params={
                             "color": merged_context.get("color"),
                             "object_type": merged_context.get("object_type"),
+                            # F13: the kernel's chosen-target identity, when it had to
+                            # disambiguate description-identical objects. Absent for the
+                            # ordinary unique-match case.
+                            "target_ref": merged_context.get("target_ref"),
                         },
                     )
                 )
@@ -409,8 +444,21 @@ class MiniGridSense:
                     "color": color,
                     "state": state,
                     "visible": True,
+                    # Adapter-minted opaque identity. MiniGrid has no native object
+                    # ids, and position is its only stable per-object identity (the
+                    # world is static), so the id is derived from the cell. The kernel
+                    # treats this as an opaque handle and never parses it; a substrate
+                    # with native ids (AI2-THOR) supplies its own here instead. This is
+                    # what lets the kernel disambiguate two description-identical
+                    # objects (two red doors, two apples) by identity, not attributes.
+                    "object_id": self._mint_object_id(cell["x"], cell["y"]),
                 }
             )
+
+    @staticmethod
+    def _mint_object_id(x: int, y: int) -> str:
+        """Opaque, stable per-object id for MiniGrid (derived from the static cell)."""
+        return f"mg-cell:{int(x)}:{int(y)}"
 
     def _build_occupancy_grid(self, sample: WorldModelSample) -> None:
         self._ensure_parsed_grid(sample)
@@ -487,6 +535,34 @@ class MiniGridSense:
         sample.target_visible = False
         sample.target_location = self.memory.episodic_memory.get("known_target_location")
         sample.target_object = None
+
+        # F13: when the kernel already disambiguated among description-identical
+        # objects, it stamps the chosen object's identity into target_ref. Prefer the
+        # object with that identity so Sense grounds the one the brain picked instead
+        # of the first description match in scan order. Match on the adapter-minted
+        # object_id (the real, substrate-neutral identity); fall back to the coord for
+        # paths where an id is unavailable. Sense treats both as opaque keys.
+        chosen_id = _target_ref_object_id(params.get("target_ref"))
+        chosen_coord = _target_ref_coord(params.get("target_ref"))
+        if chosen_id is not None or chosen_coord is not None:
+            for obj in sample.grid_objects:
+                if target_type and obj["type"] != target_type:
+                    continue
+                if target_color and obj["color"] != target_color:
+                    continue
+                id_match = chosen_id is not None and obj.get("object_id") == chosen_id
+                coord_match = (
+                    chosen_id is None
+                    and chosen_coord is not None
+                    and (obj["x"], obj["y"]) == chosen_coord
+                )
+                if id_match or coord_match:
+                    sample.target_visible = True
+                    sample.target_location = (obj["x"], obj["y"])
+                    sample.target_object = obj
+                    return
+            # The chosen object is not currently observable (out of FOV, or the world
+            # changed): fall through to a description match rather than fabricating it.
 
         for obj in sample.grid_objects:
             if target_type and obj["type"] != target_type:

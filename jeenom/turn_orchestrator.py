@@ -18,6 +18,21 @@ from .schemas import (
 )
 
 
+# Structural multi-step intents own their own routing and decompose into sub-steps.
+# Their `grounding_query_plan`/`target_selector` (if the model filled one for a single
+# clause) must NOT hijack dispatch into single-result grounding composition — the
+# structural intent type wins, and any query sub-step is handled per step.
+MULTI_STEP_INTENT_TYPES = frozenset(
+    {
+        "sequence_instruction",
+        "procedure_recall",
+        "mission_contract",
+        "motor_sequence",
+        "conditional_sense_motor",
+    }
+)
+
+
 def _approved(
     command_type: str,
     utterance: str = "",
@@ -298,7 +313,10 @@ class TurnOrchestrator:
 
         # ── Request plan recording (all non-control intents) ─────────────────
         request_plan_recorded = False
-        if intent.grounding_query_plan is not None:
+        if (
+            intent.grounding_query_plan is not None
+            and intent.intent_type not in MULTI_STEP_INTENT_TYPES
+        ):
             station._record_request_plan(utterance, intent)
             request_plan_recorded = True
             plan_command = station._command_from_grounding_query_plan(utterance, intent)

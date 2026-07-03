@@ -249,11 +249,16 @@ def canonical_task_params(
     color: str | None = None,
     object_type: str | None = None,
     target_location: tuple[int, int] | None = None,
+    target_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "color": color,
         "object_type": object_type,
         "target_location": target_location,
+        # F13: substrate-neutral identity of the specific object the kernel chose when
+        # description alone was ambiguous (e.g. {"coord": (x, y)}). None for the common
+        # case where colour+type already name a unique object.
+        "target_ref": target_ref,
     }
 
 

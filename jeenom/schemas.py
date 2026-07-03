@@ -2135,6 +2135,7 @@ class SceneObject:
     y: float
     state: int | None = None
     z: float | None = None  # absent on 2D substrates (MiniGrid); set on 3D ones
+    object_id: str | None = None  # adapter-minted opaque identity; kernel never parses it
 
     @property
     def coord(self) -> tuple[float, ...]:
@@ -2206,6 +2207,7 @@ class SceneModel:
                 y=geometry.as_coord(obj["y"]),
                 state=obj.get("state"),
                 z=geometry.as_coord(obj["z"]) if obj.get("z") is not None else None,
+                object_id=obj.get("object_id"),
             )
             for obj in (sample.grid_objects or [])
         ]
@@ -2237,6 +2239,7 @@ class GroundedObjectEntry:
     object_type: str = "unknown"
     metric: str | None = None       # e.g. "manhattan", "euclidean"
     provenance: str | None = None   # primitive handle that produced this entry
+    object_id: str | None = None    # adapter-minted opaque identity of the chosen object
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2247,6 +2250,7 @@ class GroundedObjectEntry:
             "distance": self.distance,
             "metric": self.metric,
             "provenance": self.provenance,
+            "object_id": self.object_id,
         }
 
 
