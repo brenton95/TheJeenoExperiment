@@ -251,6 +251,15 @@ Freshness:
 Looking away is not a world change. Only spatial observation claims become `unverifiable` because
 of framing. Durable assertions, facts, and procedures do not.
 
+Target identity is separate from both axes (Phase 13B.5t, F13): when grounding disambiguates among
+description-identical objects, the chosen object's **adapter-minted opaque `object_id`** is threaded
+through task params (`target_ref`) into the `EvidenceFrame` context, and Sense matches id-to-id.
+Attributes ("closest", "the second red door") are selection queries that resolve to an identity;
+execution carries the identity, never a re-description. The substrate owns identity minting —
+MiniGrid derives ids from its static cells, a substrate with native ids supplies its own — and the
+kernel never parses the handle. `target_ref` is a disambiguation hint, not a claim, so it does not
+interact with freshness or decay.
+
 Partial-observability rule:
 
 - `visible_only` must answer from current evidence or ask for help;
@@ -502,6 +511,7 @@ spikes, and bug history are expanded in [task_plan.md](task_plan.md).
 | Conditional missions | Sense -> Cortex condition -> one Spine action -> fresh Sense | repeated motor loops that discard stop clauses |
 | Episode continuity | live adapter reuse; explicit reset; synchronous Ctrl+C | accidental reset at task admission or premature concurrency |
 | Object types | context-driven meaning plus exact manifest handles | global supported-type list or vocabulary-implies-capability |
+| Target identity (F13) | adapter-minted opaque `object_id` threaded via `target_ref`; attributes select, identity carries through | re-describing the chosen object in words, or kernel-constructed coordinates as identity |
 | Primitive construction | query-only structured formulas, approval, validation, provenance | arbitrary operator code or synthesized actuation authority |
 | Station decomposition | state-first `StationRuntime`, deferred to Phase 16 | method-first leaf extraction around pre-13B data shapes |
 | ORPI versioning | v0.1 until a second substrate breaks/proves it | freezing an n=1 interface |
@@ -514,7 +524,8 @@ Status and execution order live in the Phase 16 section of
 section owns the enduring target design.
 
 `OperatorStationSession` remains a large transitional facade. At the current repository snapshot,
-`operator_station.py` is **6,213 lines and 171 methods**. `OperatorStationSession.__init__`
+`operator_station.py` is **6,322 lines and 176 methods** (and still the default landing site for
+turn-logic fixes — the growth mechanism the decomposition exists to stop). `OperatorStationSession.__init__`
 directly initializes 41 attributes, while additional turn and pending fields are property-backed.
 The counts are diagnostic only. The architectural problem is shared mutable state and implicit
 ownership, not the precise file length.

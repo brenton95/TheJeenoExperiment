@@ -310,7 +310,7 @@ def _looks_like_object_task(
     return any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in object_terms)
 
 
-def _parse_motor_command(
+def parse_motor_command(
     normalized: str,
     object_terms: tuple[str, ...] = _MOTOR_TASK_OBJECT_TERMS,
 ) -> tuple[str, int] | None:
@@ -348,7 +348,7 @@ def _parse_motor_sequence(
         return None
     results: list[tuple[str, int]] = []
     for part in parts:
-        cmd = _parse_motor_command(part, object_terms)
+        cmd = parse_motor_command(part, object_terms)
         if cmd is None:
             return None
         results.append(cmd)
@@ -1824,7 +1824,7 @@ class SmokeTestCompiler(CompilerBackend):
             )
 
         # Motor-command pattern: "go straight for N steps", "turn right twice", etc.
-        _motor = _parse_motor_command(motor_text, self.motor_object_terms())
+        _motor = parse_motor_command(motor_text, self.motor_object_terms())
         if _motor is not None:
             action_name, count = _motor
             return OperatorIntent(

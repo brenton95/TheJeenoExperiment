@@ -119,7 +119,7 @@ claim decay:
 - `python evals/eval_master.py`: **80/80**
 - `python evals/eval_master.py --suite orpi`: **10/10**
 - `python evals/eval_master.py --suite cleanup`: **30/30**
-- `python evals/eval_master.py --suite llm_path`: **5/5**
+- `python evals/eval_master.py --suite llm_path`: **7/7**
 - `python evals/eval_master.py --suite live_llm`: **1/1** when a live backend is configured
 - `python -m pytest -q tests`: **380 passed**, 1 warning, 12 subtests passed (includes the
   13B.5t target-identity red bar)
@@ -1220,8 +1220,46 @@ The remaining work is intentionally split:
 - structural bindings such as concrete Sense/Spine roles: validate through the second substrate
   rather than rename speculatively.
 
+Named cheap leaks (found by the 2026-07 repo diagnostic; tagged in-code with greppable
+`TECH-DEBT(...)` markers):
+
+- `TECH-DEBT(minigrid-registry-import)` — the generic `capability_registry.py` hard-imports
+  `MINIGRID_GROUNDING_PRIMITIVES` at module level and merges it into the manifest builder. The 12D
+  move took MiniGrid grounding primitives out of `primitive_library.py` but they re-entered through
+  the generic registry; registration should flow adapter → manifest → registry.
+- `TECH-DEBT(operator-colors)` — `schemas.py` `OPERATOR_COLORS` hardcodes the MiniGrid palette as
+  the schema-level validation enum and bakes it into the LLM tool schemas, bypassing
+  `OperationalContext.object_vocabulary`. **Ordering caution:** this leak is plausibly
+  curriculum-touching (vocabulary drives grounding and the enum feeds the LLM tool schemas the
+  curriculum will exercise); the 12D rule says curriculum-touching leaks precede the curriculum, so
+  this one may need to land before 13C rather than waiting for Phase 14.
+- `TECH-DEBT(metric-query-dispatch-bypass)` — **closed (2026-07-03)**. `classify_utterance` had
+  routed metric queries directly to `metric_query_summary`, skipping the IntentVerifier/dispatch
+  chain "to avoid capability-matching regressions". The red bar
+  (`tests/test_metric_query_dispatch_convergence.py`) showed the fear was stale for defined
+  metrics — `metric_query_summary` already re-dispatched a grounding intent through the same gate,
+  so both routes converged; the real hole was the undefined-metric path, which never constructed an
+  `OperatorIntent` at all (verifier never ran, `last_operator_intent` stayed `None`). Fix: the
+  metric-query patterns moved into the `IntentCache` (using its previously dead
+  `_build_metric_query_from_match` builder), the classify bypass was deleted, and dispatch exempts
+  `metric_query` from the premature capability gate because the metric owns its handle resolution
+  downstream (defined → re-dispatched grounding intent through the same gate; undefined → typed
+  `CUSTOM METRIC MISSING` definition flow, which premature arbitration would have flattened into a
+  generic refusal). All three operator-visible behaviors (registered, synthesizable, undefined
+  metric) are pinned unchanged. **Regression caught while fixing:** the first cut expressed the
+  exemption as an `intent_type == "metric_query"` comparison inside `dispatch`, and
+  `pipeline_dispatch_probe` correctly failed it against the 11C no-intent-type-chain invariant —
+  the exemption moved to a schema-declared `OperatorIntent.owns_capability_resolution` property,
+  the same layer where `knowledge_type` lives.
+
 The AI2-THOR branch is a requirements-discovery spike, not the committed port. Every ORPI bend or
 break becomes a concrete spec issue and Phase 15 requirement.
+
+**Considered and rejected (2026-07-03):** pulling the AI2-THOR spike ahead of 13C. The 13B.5t
+target-identity work and the decay TECH-DEBT tags all wait on a moving-object substrate to be
+falsifiable, and 13C's reuse metrics risk being designed against the static-grid degenerate case —
+but the operator decided to keep the spike parked at Phase 14 and proceed through 13B/13C on
+MiniGrid first. Recorded so the ordering question is not re-litigated without new evidence.
 
 ## Phase 15 - Cross-Substrate Proof And ORPI v1
 
