@@ -327,11 +327,14 @@ class TurnOrchestrator:
             station._record_request_plan(utterance, intent)
 
         # ── Intent Readiness Requirement Matching (Phase 7.59) ────────────────
-        # Runs for claim/provenance/action; skipped for procedure/control which own
-        # their own readiness semantics (knowledge ops need no capability gate).
+        # Skipped for intents that own their capability resolution downstream —
+        # procedure/control knowledge types, and schema-declared exemptions such as
+        # metric_query (see OperatorIntent.owns_capability_resolution). Arbitrating an
+        # unresolved metric name here would turn the typed "define it first" flow into a
+        # generic capability refusal.
         knowledge_type = intent.knowledge_type
         cap_match = default_matcher.match(intent, station.capability_registry)
-        if knowledge_type not in {"procedure", "control"}:
+        if not intent.owns_capability_resolution:
             composition_command = station._try_compose_grounding_result(
                 utterance,
                 intent,
@@ -453,7 +456,7 @@ class TurnOrchestrator:
             usteps = list(intent.utterance_steps or [])
             if not usteps:
                 return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
-            from .llm_compiler import _parse_motor_command as _pmc
+            from .llm_compiler import parse_motor_command as _pmc
             motor_steps = [_pmc(step) for step in usteps]
             if all(step is not None for step in motor_steps):
                 sequence = [

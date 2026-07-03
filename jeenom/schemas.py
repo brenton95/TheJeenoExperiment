@@ -102,6 +102,11 @@ CLAIM_FRESHNESS = ("current", "unverifiable", "stale", "unknown")
 CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
+# TECH-DEBT(operator-colors): this is MiniGrid's palette hardcoded as the schema-level
+# validation enum, and it is baked into the LLM tool schemas below. Colour vocabulary
+# should come from OperationalContext.object_vocabulary like object types do. Possibly
+# curriculum-touching (the enum feeds the tool schemas the curriculum exercises), so it
+# may need to land before 13C rather than waiting for Phase 14.
 OPERATOR_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
 
 # Domain vocabulary registry — populated by the domain adapter at init, never hardcoded here.
@@ -1741,6 +1746,22 @@ class OperatorIntent:
     @property
     def knowledge_type(self) -> str:
         return self._KNOWLEDGE_TYPE_MAP.get(self.intent_type, "control")
+
+    # Intent types that resolve their own capability requirements downstream and are
+    # therefore exempt from dispatch's premature capability gate. metric_query resolves
+    # metric->handle in metric_query_summary: a defined metric re-dispatches a grounding
+    # intent through the gate; an undefined metric gets the typed CUSTOM METRIC MISSING
+    # definition flow, which premature arbitration would flatten into a generic refusal.
+    _OWNS_CAPABILITY_RESOLUTION: ClassVar[frozenset[str]] = frozenset({"metric_query"})
+
+    @property
+    def owns_capability_resolution(self) -> bool:
+        """True when this intent's capability requirements are resolved downstream,
+        like procedure/control knowledge types own their own readiness semantics."""
+        return (
+            self.knowledge_type in {"procedure", "control"}
+            or self.intent_type in self._OWNS_CAPABILITY_RESOLUTION
+        )
 
     @classmethod
     def from_dict(

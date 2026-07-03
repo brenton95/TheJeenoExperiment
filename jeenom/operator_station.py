@@ -48,7 +48,7 @@ from .semantic_normalizer import (
 )
 from .side_effect_authority import SideEffectAuthority
 from .substrate_adapter import SubstrateAdapter
-from .intent_cache import IntentCache, SEQUENCE_STEP_PREFIX, SEQUENCE_STEP_SUFFIX, parse_metric_query, seed_intent_cache
+from .intent_cache import IntentCache, SEQUENCE_STEP_PREFIX, SEQUENCE_STEP_SUFFIX, seed_intent_cache
 from .turn_orchestrator import (
     KnowledgeChannel,
     PendingClarification,
@@ -289,12 +289,10 @@ def classify_utterance(
         if prefix in _nav_verbs:
             return ApprovedCommand(command_type="task_instruction", utterance=text)
 
-    # Metric-query patterns (e.g. "rank all doors by X", "what is X distance to all doors").
-    # These bypass dispatch to avoid capability-matching regressions — metric_query routes
-    # directly to metric_query_summary which handles its own plan evaluation.
-    custom_metric = parse_metric_query(text)
-    if custom_metric is not None:
-        return _approved("metric_query", text, payload={"metric": custom_metric})
+    # Metric queries ("rank all doors by X") are IntentCache patterns: they produce a
+    # metric_query OperatorIntent and route through dispatch (IntentVerifier + knowledge
+    # routing) before landing on metric_query_summary. The former classify-level bypass
+    # (TECH-DEBT(metric-query-dispatch-bypass)) is closed.
 
     # Inline metric definition + mission (e.g. "go to door closest by my_metric = min(...)").
     # Pure metric-definition patterns are handled via IntentCache before classify_utterance;
@@ -805,7 +803,7 @@ class OperatorStationSession:
         a wrong action. Bare 'and' splitting is acceptable here (unlike primary routing)
         precisely because the worst case is an extra clarification.
         """
-        from .llm_compiler import _parse_motor_command
+        from .llm_compiler import parse_motor_command
 
         normalized = _normalize_utterance(utterance)
         parts = [
@@ -817,7 +815,7 @@ class OperatorStationSession:
             return False
         executable = 0
         for part in parts:
-            if _parse_motor_command(part) is not None:
+            if parse_motor_command(part) is not None:
                 executable += 1
             elif self.domain_helper.parse_go_to_object_utterance(part) is not None:
                 executable += 1
@@ -5684,7 +5682,7 @@ class OperatorStationSession:
         # If all steps are motor commands, route to motor_sequence_execute, not sequence_execute.
         # This prevents motor-only chains like "move forward twice then turn left" from being sent
         # to _run_sequence, which only handles task (go_to_object) utterances.
-        from .llm_compiler import _parse_motor_command as _pmc
+        from .llm_compiler import parse_motor_command as _pmc
         motor_steps = [_pmc(step) for step in cleaned]
         if all(step is not None for step in motor_steps):
             sequence = [{"action": act, "count": cnt} for act, cnt in motor_steps]
@@ -5904,7 +5902,7 @@ class OperatorStationSession:
         validated before any executes: an uncompilable, nested, or non-executable
         step fails the whole sequence with no partial execution.
         """
-        from .llm_compiler import _parse_motor_command
+        from .llm_compiler import parse_motor_command
 
         # Pass 1: classify every step and reject the whole sequence before running
         # any of them if a step cannot compile into an executable sequence step.
@@ -5915,7 +5913,7 @@ class OperatorStationSession:
             # the LLM (which classifies the same phrase inconsistently and can demote it
             # to a clarification via plan readiness) — the step still mints its own
             # RawMotorTicket at execution.
-            motor = _parse_motor_command(step_utterance)
+            motor = parse_motor_command(step_utterance)
             if motor is not None:
                 action_name, count = motor
                 command = ApprovedCommand(
