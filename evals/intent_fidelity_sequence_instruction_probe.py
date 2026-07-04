@@ -175,6 +175,29 @@ def main() -> int:
         metrics["handle_utterance_raw_seq_runs"] = "PROCEDURE COMPLETE" in resp
         metrics["handle_utterance_last_result_set"] = sess2.last_result is not None
 
+    # ── Heterogeneous sequence: motor + task steps in one chain ───────────────
+    # Closes the historical coverage hole: the binary all-task/all-motor probes
+    # never exercised a sequence that mixed a raw motor step with a task step,
+    # which the task-only builder could not compile.
+    with patch("jeenom.run_demo.build_env", side_effect=_build_env):
+        sess_mixed = _make_session()
+        mixed = sess_mixed.handle_utterance("turn right then go to the red door")
+        metrics["mixed_motor_then_task_runs"] = (
+            "PROCEDURE COMPLETE" in mixed
+            and "SEQUENCE ERROR" not in mixed
+            and "MOTOR COMPLETE" in mixed
+            and ("RUN COMPLETE" in mixed or "TASK COMPLETE" in mixed)
+        )
+
+        sess_mixed2 = _make_session()
+        mixed2 = sess_mixed2.handle_utterance("go to the red door then turn right")
+        metrics["mixed_task_then_motor_runs"] = (
+            "PROCEDURE COMPLETE" in mixed2
+            and "SEQUENCE ERROR" not in mixed2
+            and "MOTOR COMPLETE" in mixed2
+            and ("RUN COMPLETE" in mixed2 or "TASK COMPLETE" in mixed2)
+        )
+
     # ── _try_natural_sequence returns ApprovedCommand for multi-word parts ────
     with patch("jeenom.run_demo.build_env", side_effect=_build_env):
         sess3 = _make_session()

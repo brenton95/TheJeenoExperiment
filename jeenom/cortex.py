@@ -11,9 +11,9 @@ from .claim_freshness import (
 )
 from .command_registry import DIRECT_ACTION_SKILLS, evidence_needs_for_step
 from .schemas import (
+    ClaimRecord,
     EvidenceFrame,
     ExecutionContract,
-    ObservationClaim,
     ReadinessReport,
     TraceEvent,
 )
@@ -31,7 +31,6 @@ class Cortex:
         self.memory = memory
         self.compiler = compiler
         self.plan_cache = plan_cache
-        self._claims: dict[str, ObservationClaim] = {}
         self.trace: list[TraceEvent] = []
         self.task_request = None
         self.procedure = None
@@ -47,8 +46,19 @@ class Cortex:
 
     # ── Claim accessors ────────────────────────────────────────────────────────
 
+    @property
+    def _claims(self) -> dict[str, ClaimRecord]:
+        """The single mission-scoped claim store, owned by OperationalMemory.
+
+        Read through a property (not a captured reference) so a fresh Cortex over
+        the same memory sees retained belief, and a typed reset that reassigns
+        ``memory.claims`` is reflected here. The RepresentationStore shares this
+        same dict.
+        """
+        return self.memory.claims
+
     @staticmethod
-    def _is_usable(claim: ObservationClaim | None) -> bool:
+    def _is_usable(claim: ClaimRecord | None) -> bool:
         """A claim contributes to the hot path only while its freshness is usable."""
         return claim is not None and claim.freshness in _USABLE_FRESHNESS
 
@@ -71,19 +81,55 @@ class Cortex:
         key: str,
         value: Any,
         source: str = "sense",
-        level: str = "command",
         freshness: str = FRESHNESS_CURRENT,
         last_observed_tick: int | None = None,
     ) -> None:
-        """Store a raw value as a typed ObservationClaim carrying a freshness state."""
-        self._claims[key] = ObservationClaim(
+        """Store a raw value as an observation ClaimRecord carrying a freshness state.
+
+        Hot-path sensory facts are authored as ``kind="observation"`` claims in the
+        shared mission store. Only these decay (see ``update_from_evidence``);
+        durable claims sharing the store are left untouched.
+        """
+        self._claims[key] = ClaimRecord(
+            claim_id=f"observation:{key}",
             key=key,
             value=value,
+            kind="observation",
+            status="observed",
+            scope="grounding",
+            authority="sense",
             source=source,
-            level=level,
             freshness=freshness,
             last_observed_tick=last_observed_tick,
+            # Bind the observation to the grounding frame that produced it so a
+            # later task targeting a different object cannot read this as belief.
+            provenance={"target_context": list(self._grounding_context())},
         )
+
+    def _grounding_context(self) -> tuple[Any, Any]:
+        """The (color, object_type) the current task grounds against."""
+        return (
+            self.resolved_task_params.get("color"),
+            self.resolved_task_params.get("object_type"),
+        )
+
+    def _stale_grounding_on_context_change(self) -> None:
+        """Invalidate grounding observations bound to a different target context.
+
+        A new task targeting a different object is a grounding-frame change: prior
+        target-bound observations (e.g. ``target_location``) are stale, not retained
+        belief. Durable claims (operator assertions, facts, procedures) carry no
+        ``target_context`` and are left untouched — they persist until typed reset.
+        Same-target re-admission ("repeat the last task") leaves belief in place.
+        """
+        new_ctx = list(self._grounding_context())
+        for claim in self._claims.values():
+            recorded = claim.provenance.get("target_context")
+            if recorded is None:
+                continue
+            if list(recorded) != new_ctx:
+                claim.freshness = "stale"
+                claim.status = "invalidated"
 
     def has_claim(self, key: str) -> bool:
         """Return True if claim `key` is present, usable, and its value is truthy."""
@@ -96,6 +142,7 @@ class Cortex:
         self.task_request = task_request
         self.procedure = procedure
         self.resolved_task_params = self.memory.resolve_target_params(task_request.params)
+        self._stale_grounding_on_context_change()
         self.memory.reset_episode(clear_reference_context=False)
         self.execution_state.update(
             {
@@ -193,10 +240,10 @@ class Cortex:
                 self.execution_state["conditional_action_pending"] = False
             self.execution_state["conditional_last_pose"] = pose
 
-        # TECH-DEBT(mission-clock-rests-on-skip-reset): step_count is the decay clock,
-        # but it only spans a whole mission because the station reuses the adapter with
-        # skip_reset=True — that reuse is not yet a guaranteed contract. Intra-task
-        # decay (the only thing wired here) does not depend on it.
+        # step_count is the decay clock. Belief now lives in the mission-scoped
+        # memory.claims store (not rebuilt per task) and is cleared only by a typed
+        # reset, so decay spans a mission across run_episode calls. The former
+        # mission-clock and intra-task-decay debt is closed by claim unification.
         tick = getattr(world_sample, "step_count", None) if world_sample is not None else None
         observed_keys = set(evidence.claims.keys())
 
@@ -204,15 +251,17 @@ class Cortex:
             for key, claim in self._claims.items():
                 if key in observed_keys:
                     continue  # re-observed this tick; refreshed below
+                # Safety property of the unified store: only observations age.
+                # Durable claims (operator assertions, facts, procedures) share
+                # this dict and must NOT decay because the agent looked away.
+                if claim.kind != OBSERVATION_KIND:
+                    continue
                 last_tick = claim.last_observed_tick
                 steps_unseen = max(0, tick - last_tick) if last_tick is not None else 0
-                # TECH-DEBT(uniform-decay): every carried claim ages as an observation
-                # at the single UNVERIFIABLE_DECAY_STEPS rate; per-kind rates
-                # (ttl_for_kind) stay dormant until a substrate with a changing world
-                # (AI2-THOR) can falsify them. MiniGrid cannot.
-                # TECH-DEBT(intra-task-decay): cortex._claims is rebuilt per task, so
-                # this decay is intra-task only; mission-scope decay waits until belief
-                # moves into memory (mission-contract phase).
+                # TECH-DEBT(uniform-decay): every carried observation ages at the
+                # single UNVERIFIABLE_DECAY_STEPS rate; per-kind rates (ttl_for_kind)
+                # stay dormant until a substrate with a changing world (AI2-THOR) can
+                # falsify them. MiniGrid cannot.
                 claim.freshness = next_freshness(
                     claim.freshness,
                     kind=OBSERVATION_KIND,

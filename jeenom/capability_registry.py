@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Any
 
+# TECH-DEBT(minigrid-registry-import): the generic registry hard-imports the MiniGrid
+# grounding library and merges it into the manifest builder below. Registration should
+# flow adapter -> manifest -> registry so a second substrate does not need to edit this
+# module. Phase 14 owns the removal.
 from .minigrid_primitive_library import MINIGRID_GROUNDING_PRIMITIVES
 from .primitive_library import (
     ACTION_PRIMITIVES,

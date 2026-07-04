@@ -251,6 +251,15 @@ Freshness:
 Looking away is not a world change. Only spatial observation claims become `unverifiable` because
 of framing. Durable assertions, facts, and procedures do not.
 
+Target identity is separate from both axes (Phase 13B.5t, F13): when grounding disambiguates among
+description-identical objects, the chosen object's **adapter-minted opaque `object_id`** is threaded
+through task params (`target_ref`) into the `EvidenceFrame` context, and Sense matches id-to-id.
+Attributes ("closest", "the second red door") are selection queries that resolve to an identity;
+execution carries the identity, never a re-description. The substrate owns identity minting —
+MiniGrid derives ids from its static cells, a substrate with native ids supplies its own — and the
+kernel never parses the handle. `target_ref` is a disambiguation hint, not a claim, so it does not
+interact with freshness or decay.
+
 Partial-observability rule:
 
 - `visible_only` must answer from current evidence or ask for help;
@@ -278,8 +287,10 @@ The accepted model is claim persistence with freshness:
 - known environment/world mutation makes it `stale`.
 
 This is why target evidence stops being re-emitted when out of view, and why passable-cell belief
-has expiry rather than an unbounded union. The current two decay sites and their limitations are
-documented under [Freshness decay](#freshness-decay--known-debt-phase-13b-claim-decay-on-the-cortex-loop).
+has expiry rather than an unbounded union. Claim belief now lives in one mission-scoped
+`ClaimRecord` store; the remaining separate Sense-side occupancy decay site and the other current
+limitations are documented under
+[Freshness decay](#freshness-decay--known-debt-phase-13b-claim-decay-on-the-cortex-loop).
 
 ## MissionContract
 
@@ -500,6 +511,7 @@ spikes, and bug history are expanded in [task_plan.md](task_plan.md).
 | Conditional missions | Sense -> Cortex condition -> one Spine action -> fresh Sense | repeated motor loops that discard stop clauses |
 | Episode continuity | live adapter reuse; explicit reset; synchronous Ctrl+C | accidental reset at task admission or premature concurrency |
 | Object types | context-driven meaning plus exact manifest handles | global supported-type list or vocabulary-implies-capability |
+| Target identity (F13) | adapter-minted opaque `object_id` threaded via `target_ref`; attributes select, identity carries through | re-describing the chosen object in words, or kernel-constructed coordinates as identity |
 | Primitive construction | query-only structured formulas, approval, validation, provenance | arbitrary operator code or synthesized actuation authority |
 | Station decomposition | state-first `StationRuntime`, deferred to Phase 16 | method-first leaf extraction around pre-13B data shapes |
 | ORPI versioning | v0.1 until a second substrate breaks/proves it | freezing an n=1 interface |
@@ -512,7 +524,8 @@ Status and execution order live in the Phase 16 section of
 section owns the enduring target design.
 
 `OperatorStationSession` remains a large transitional facade. At the current repository snapshot,
-`operator_station.py` is **6,213 lines and 171 methods**. `OperatorStationSession.__init__`
+`operator_station.py` is **6,322 lines and 176 methods** (and still the default landing site for
+turn-logic fixes — the growth mechanism the decomposition exists to stop). `OperatorStationSession.__init__`
 directly initializes 41 attributes, while additional turn and pending fields are property-backed.
 The counts are diagnostic only. The architectural problem is shared mutable state and implicit
 ownership, not the precise file length.
@@ -610,22 +623,24 @@ authority is preferable to several smaller services sharing state informally.
 
 ### Freshness decay — known debt (Phase 13B claim decay on the cortex loop)
 
-The decay machine is live on the cortex loop, clocked by `world_sample.step_count`. Three
-deliberate simplifications are tagged in-code with greppable markers (`grep -rn "TECH-DEBT" jeenom/`):
+The decay machine is live on the cortex loop, clocked by `world_sample.step_count`. Claim
+unification collapsed `ObservationClaim`/`ExecutionClaim` into the single `ClaimRecord` type and
+moved the cortex belief loop onto one mission-scoped store (`OperationalMemory.claims`) shared with
+the `RepresentationStore`. That store is cleared only on a typed reset; a new task targeting a
+different object stales the prior grounding observations through the freshness model rather than
+contaminating the new target. This closed the former intra-task-decay and mission-clock debt:
+belief now persists across `run_episode` task runs and decays across a mission. Two deliberate
+simplifications remain, tagged in-code with greppable markers (`grep -rn "TECH-DEBT" jeenom/`):
 
-- `# TECH-DEBT(uniform-decay):` — every claim ages as an observation at the single
-  `UNVERIFIABLE_DECAY_STEPS` rate; per-kind rates (`ttl_for_kind`) stay dormant until a
-  substrate with a changing world (AI2-THOR) can falsify per-kind decay. MiniGrid cannot.
-- `# TECH-DEBT(intra-task-decay):` — `cortex._claims` is rebuilt per task, so decay is
-  intra-task only; mission-scope decay waits until belief moves into `memory` (mission-contract
-  phase).
-- `# TECH-DEBT(mission-clock-rests-on-skip-reset):` — `step_count` spans a mission only because
-  the station reuses the adapter with `skip_reset=True`; that reuse is not yet a guaranteed
-  contract, and mission-scope decay will depend on it.
-- `# TECH-DEBT(occupancy-decay-sites):` — the spatial passable belief decays in the perception
-  layer (Sense) via the same freshness TTL, parallel to the Step 2 cortex claim-decay loop rather
-  than unified with it. It must be Sense-side because the planner reads `passable_positions` from
-  percepts before the cortex runs. Unifying the two decay sites onto one claim store is deferred.
+- `# TECH-DEBT(uniform-decay):` — every observation ages at the single `UNVERIFIABLE_DECAY_STEPS`
+  rate; per-kind rates (`ttl_for_kind`) stay dormant until a substrate with a changing world
+  (AI2-THOR) can falsify per-kind decay. MiniGrid cannot.
+- `# TECH-DEBT(occupancy-decay-sites):` — the spatial passable belief still decays in the
+  perception layer (Sense) via the same freshness TTL, as a separate per-cell store, rather than on
+  the unified `ClaimRecord` store. It must be Sense-side because the planner reads
+  `passable_positions` from percepts before the cortex runs, and folding per-cell occupancy onto
+  `ClaimRecord` would change per-cell decay semantics and add hundreds of validated records per
+  tick. This second decay site is deliberately deferred — it was *not* closed by the claim merge.
 
 ## Threat Model
 

@@ -213,12 +213,19 @@ def parse_metric_query(text: str) -> str | None:
 def seed_intent_cache(cache: IntentCache, registry: Any) -> None:
     """Register fast-path NLU patterns into cache at station startup.
 
-    Metric-definition, concept-teach, and concept-forget patterns are registered here.
-    Metric-query and delivery-target remain in classify_utterance (they produce
-    ApprovedCommand directly and skip dispatch; routing them through dispatch causes
-    capability-matching regressions since neither intent type has registered primitives).
+    Metric-definition, metric-query, concept-teach, and concept-forget patterns are
+    registered here; cache hits produce OperatorIntent and route through dispatch
+    (IntentVerifier + knowledge-type routing) like LLM intents. Metric queries own their
+    metric->handle resolution downstream in metric_query_summary, so dispatch exempts
+    them from the premature capability gate rather than arbitrating an unresolved metric
+    name. Delivery-target remains in classify_utterance as an exact continuation
+    pattern.
     """
     from .schemas import OperatorIntent
+
+    # Metric-query patterns (substring search) → metric_query intent through dispatch.
+    for pat in _METRIC_QUERY_PATTERNS:
+        cache._register_compiled(pat, _build_metric_query_from_match, search=True)
 
     # Metric-definition patterns (anchored match, 3 variants) → primitive_definition intent
     for pat in _PRIM_DEF_PATTERNS:

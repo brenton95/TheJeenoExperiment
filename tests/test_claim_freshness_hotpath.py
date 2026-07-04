@@ -1,10 +1,9 @@
 """Step 1 of the partial-observability fix: freshness on the hot path.
 
-The cortex execution loop stores sensory facts as `ObservationClaim` objects.
-Today those claims are timeless — a belief is either present or absent. This step
-makes the hot-path claim type *carry* a freshness state and makes the cortex
-accessors *respect* it, without yet introducing any decay machine (Step 2) or
-spatial map (Step 3).
+The cortex execution loop stores sensory facts as `ClaimRecord` objects authored
+as ``kind="observation"`` (post claim-unification). Those claims *carry* a
+freshness state and the cortex accessors *respect* it, without yet introducing any
+decay machine (Step 2) or spatial map (Step 3).
 
 Freshness semantics on read:
 - ``current``      — observed now; usable.
@@ -27,7 +26,7 @@ from types import SimpleNamespace
 from jeenom.cortex import Cortex
 from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.memory import OperationalMemory
-from jeenom.schemas import ObservationClaim
+from jeenom.schemas import ClaimRecord
 
 
 def _cortex() -> Cortex:
@@ -38,14 +37,18 @@ def _cortex() -> Cortex:
 
 
 def test_observation_claim_carries_freshness_defaulting_current():
-    field_names = {f.name for f in fields(ObservationClaim)}
+    field_names = {f.name for f in fields(ClaimRecord)}
     assert "freshness" in field_names
 
-    claim = ObservationClaim(key="target_location", value=(3, 4))
+    cortex = _cortex()
+    cortex.set_claim("target_location", (3, 4))
+    claim = cortex._claims["target_location"]
+    assert isinstance(claim, ClaimRecord)
+    assert claim.kind == "observation"
     assert claim.freshness == "current"
 
-    explicit = ObservationClaim(key="k", value=1, freshness="unverifiable")
-    assert explicit.freshness == "unverifiable"
+    cortex.set_claim("k", 1, freshness="unverifiable")
+    assert cortex._claims["k"].freshness == "unverifiable"
 
 
 def test_set_claim_accepts_and_stores_freshness():

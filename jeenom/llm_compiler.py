@@ -249,11 +249,16 @@ def canonical_task_params(
     color: str | None = None,
     object_type: str | None = None,
     target_location: tuple[int, int] | None = None,
+    target_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "color": color,
         "object_type": object_type,
         "target_location": target_location,
+        # F13: substrate-neutral identity of the specific object the kernel chose when
+        # description alone was ambiguous (e.g. {"coord": (x, y)}). None for the common
+        # case where colour+type already name a unique object.
+        "target_ref": target_ref,
     }
 
 
@@ -305,7 +310,7 @@ def _looks_like_object_task(
     return any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in object_terms)
 
 
-def _parse_motor_command(
+def parse_motor_command(
     normalized: str,
     object_terms: tuple[str, ...] = _MOTOR_TASK_OBJECT_TERMS,
 ) -> tuple[str, int] | None:
@@ -343,7 +348,7 @@ def _parse_motor_sequence(
         return None
     results: list[tuple[str, int]] = []
     for part in parts:
-        cmd = _parse_motor_command(part, object_terms)
+        cmd = parse_motor_command(part, object_terms)
         if cmd is None:
             return None
         results.append(cmd)
@@ -1819,7 +1824,7 @@ class SmokeTestCompiler(CompilerBackend):
             )
 
         # Motor-command pattern: "go straight for N steps", "turn right twice", etc.
-        _motor = _parse_motor_command(motor_text, self.motor_object_terms())
+        _motor = parse_motor_command(motor_text, self.motor_object_terms())
         if _motor is not None:
             action_name, count = _motor
             return OperatorIntent(
@@ -2174,6 +2179,21 @@ class LLMCompiler(CompilerBackend):
                 "steps' — emit intent_type='motor_sequence' and encode utterance_steps as "
                 "['action_name:count', ...], for example ['turn_left:2','move_forward:1']. "
                 "Do not emit sequence_instruction for all-motor sequences. "
+                "Set required_capabilities=[]. "
+                "When the operator combines MULTIPLE DISTINCT steps of DIFFERENT kinds in one "
+                "utterance — a motor action, a navigation task, and/or a scene question — joined "
+                "by 'then', 'and', 'and then', commas, or similar, decompose it into "
+                "intent_type='sequence_instruction' with utterance_steps set to the ordered list "
+                "of atomic step phrases, one phrase per step. A step phrase may be a motor action "
+                "('turn left', 'go forward twice'), a task instruction ('go to the red door'), or "
+                "a scene/observation question ('what door do you see', 'what do you see around "
+                "you'). Example: utterance='turn left and go straight twice and tell me what door "
+                "you see' -> intent_type='sequence_instruction', utterance_steps=['turn left', "
+                "'go straight twice', 'what door do you see']. The station orchestrates the steps "
+                "in order, each through its own authorized command path. Decompose ONLY genuinely "
+                "multi-step requests; never split a single coherent instruction. Reserve "
+                "motor_sequence for chains made ONLY of motor actions; use sequence_instruction "
+                "whenever the steps mix kinds or include a task or a question. "
                 "Set required_capabilities=[]. "
                 "When the operator says to repeat one motor action UNTIL or TILL a target "
                 "becomes visible — e.g. 'go straight until you see a blue door' — emit "

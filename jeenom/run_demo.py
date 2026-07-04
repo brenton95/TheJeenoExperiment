@@ -284,6 +284,39 @@ def prewarm_jit_cache(
             ),
             ExecutionContext(active_skill="navigate_to_object", params=dict(navigate_params)),
         ),
+        # Warm-start coverage: with the mission-scoped claim store, retained belief
+        # from a prior task can satisfy early steps, so the first runtime tick
+        # (always active_skill="idle") may land on a later step instead of
+        # locate_object. Warm the idle variant of every step a warm start can begin
+        # on, so the rendered loop never compiles. (Cold start still begins at
+        # locate_object:idle.)
+        (
+            "navigate_to_object:idle",
+            EvidenceFrame(
+                needs=["object_location", "agent_pose", "occupancy_grid", "adjacency_to_target"],
+                context=dict(base_params),
+                active_step="navigate_to_object",
+            ),
+            ExecutionContext(active_skill="idle", params=dict(base_params)),
+        ),
+        (
+            "verify_adjacent:idle",
+            EvidenceFrame(
+                needs=["agent_pose", "object_location", "adjacency_to_target"],
+                context=dict(base_params),
+                active_step="verify_adjacent",
+            ),
+            ExecutionContext(active_skill="idle", params=dict(navigate_params)),
+        ),
+        (
+            "done:idle",
+            EvidenceFrame(
+                needs=["adjacency_to_target"],
+                context=dict(base_params),
+                active_step="done",
+            ),
+            ExecutionContext(active_skill="idle", params=dict(navigate_params)),
+        ),
     ]
     if "act_until_evidence" in procedure_recipe.steps:
         sense_warmups = [

@@ -1,26 +1,31 @@
-"""Phase 8.10 probe: Typed Claims.
+"""Typed Claims probe (claim unification).
 
-Verifies that Cortex's internal claim store uses typed ObservationClaim objects
-behind a clean accessor interface, while maintaining full backward compatibility
-with existing code that reads the raw-value claims dict.
+Verifies that Cortex's claim store uses the single unified ``ClaimRecord`` type
+behind a clean accessor interface, while maintaining backward compatibility with
+code that reads the raw-value claims dict.
+
+This probe previously pinned the now-removed ``ObservationClaim``/``ExecutionClaim``
+duplication. The claim-unification pass deliberately reversed that decision:
+``ClaimRecord`` is the one claim type, and the Cortex belief loop shares one
+mission-scoped store with the representation surface.
 
 Checks:
-  observation_claim_in_schemas   — ObservationClaim importable from jeenom.schemas
-  execution_claim_in_schemas     — ExecutionClaim importable from jeenom.schemas
-  observation_claim_fields       — ObservationClaim has key, value, source, level, confidence, scope
-  execution_claim_fields         — ExecutionClaim has source_primitive, level, scope, success, steps_taken
+  claim_record_in_schemas        — ClaimRecord importable from jeenom.schemas
+  claim_record_observation_fields — ClaimRecord carries the hot-path fields
+                                     (key, value, source, freshness, last_observed_tick)
   cortex_has_get_claim           — Cortex has get_claim() method
   cortex_has_set_claim           — Cortex has set_claim() method
   cortex_has_has_claim           — Cortex has has_claim() method
   cortex_claims_property         — cortex.claims returns a plain dict (backward compat)
-  internal_store_typed           — Cortex._claims holds ObservationClaim objects
+  internal_store_typed           — Cortex._claims holds ClaimRecord objects
+  internal_store_kind_observation — set_claim authors kind="observation" claims
   set_get_roundtrip              — set_claim/get_claim round-trip preserves value
   has_claim_truthy               — has_claim returns True for a truthy value
   has_claim_falsy                — has_claim returns False for None or falsy value
   has_claim_absent               — has_claim returns False when key not set
-  claims_property_raw_values     — claims property exposes raw values, not ObservationClaim
-  update_from_evidence_typed     — update_from_evidence stores ObservationClaim internally
-  update_from_evidence_source    — ObservationClaim.source matches evidence.source
+  claims_property_raw_values     — claims property exposes raw values, not ClaimRecord
+  update_from_evidence_typed     — update_from_evidence stores ClaimRecord internally
+  update_from_evidence_source    — ClaimRecord.source matches evidence.source
   regression_full_task           — full task run still completes (go to the red door)
 """
 from __future__ import annotations
@@ -45,29 +50,19 @@ from jeenom.cortex import Cortex
 from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.memory import OperationalMemory
 from jeenom.operator_station import OperatorStationSession
-from jeenom.schemas import ExecutionClaim, ObservationClaim, OperationalEvidence
-
-
-
-
+from jeenom.schemas import ClaimRecord, OperationalEvidence
 
 
 def main() -> int:
     metrics: dict[str, bool] = {}
 
     # ── Schema checks ──────────────────────────────────────────────────────────
-    metrics["observation_claim_in_schemas"] = ObservationClaim is not None
-    metrics["execution_claim_in_schemas"] = ExecutionClaim is not None
+    metrics["claim_record_in_schemas"] = ClaimRecord is not None
 
-    obs_field_names = {f.name for f in fields(ObservationClaim)}
-    metrics["observation_claim_fields"] = {
-        "key", "value", "source", "level", "confidence", "scope"
-    }.issubset(obs_field_names)
-
-    exec_field_names = {f.name for f in fields(ExecutionClaim)}
-    metrics["execution_claim_fields"] = {
-        "source_primitive", "level", "scope", "success", "steps_taken"
-    }.issubset(exec_field_names)
+    claim_field_names = {f.name for f in fields(ClaimRecord)}
+    metrics["claim_record_observation_fields"] = {
+        "key", "value", "source", "freshness", "last_observed_tick"
+    }.issubset(claim_field_names)
 
     # ── Cortex accessor interface ──────────────────────────────────────────────
     metrics["cortex_has_get_claim"] = callable(getattr(Cortex, "get_claim", None))
@@ -85,6 +80,10 @@ def main() -> int:
     metrics["internal_store_typed"] = isinstance(cortex._claims, dict)
 
     cortex.set_claim("target_location", (3, 4))
+    stored = cortex._claims.get("target_location")
+    metrics["internal_store_kind_observation"] = (
+        isinstance(stored, ClaimRecord) and stored.kind == "observation"
+    )
     metrics["set_get_roundtrip"] = cortex.get_claim("target_location") == (3, 4)
     metrics["has_claim_truthy"] = cortex.has_claim("target_location")
 
@@ -95,11 +94,11 @@ def main() -> int:
     metrics["claims_property_raw_values"] = (
         isinstance(cortex.claims, dict)
         and cortex.claims.get("target_location") == (3, 4)
-        and not isinstance(cortex.claims.get("target_location"), ObservationClaim)
+        and not isinstance(cortex.claims.get("target_location"), ClaimRecord)
     )
 
-    # ── update_from_evidence stores typed ObservationClaim ────────────────────
-    cortex2 = Cortex(memory=memory, compiler=compiler)
+    # ── update_from_evidence stores a typed ClaimRecord ───────────────────────
+    cortex2 = Cortex(memory=OperationalMemory(root=Path(tempfile.mkdtemp())), compiler=compiler)
     evidence = OperationalEvidence(
         claims={"target_location": (5, 6), "adjacency_to_target": False},
         confidence=1.0,
@@ -108,7 +107,7 @@ def main() -> int:
     cortex2.update_from_evidence(evidence)
 
     metrics["update_from_evidence_typed"] = isinstance(
-        cortex2._claims.get("target_location"), ObservationClaim
+        cortex2._claims.get("target_location"), ClaimRecord
     )
     metrics["update_from_evidence_source"] = (
         cortex2._claims["target_location"].source == "sense"

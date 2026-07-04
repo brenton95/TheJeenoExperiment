@@ -18,6 +18,21 @@ from .schemas import (
 )
 
 
+# Structural multi-step intents own their own routing and decompose into sub-steps.
+# Their `grounding_query_plan`/`target_selector` (if the model filled one for a single
+# clause) must NOT hijack dispatch into single-result grounding composition — the
+# structural intent type wins, and any query sub-step is handled per step.
+MULTI_STEP_INTENT_TYPES = frozenset(
+    {
+        "sequence_instruction",
+        "procedure_recall",
+        "mission_contract",
+        "motor_sequence",
+        "conditional_sense_motor",
+    }
+)
+
+
 def _approved(
     command_type: str,
     utterance: str = "",
@@ -298,7 +313,10 @@ class TurnOrchestrator:
 
         # ── Request plan recording (all non-control intents) ─────────────────
         request_plan_recorded = False
-        if intent.grounding_query_plan is not None:
+        if (
+            intent.grounding_query_plan is not None
+            and intent.intent_type not in MULTI_STEP_INTENT_TYPES
+        ):
             station._record_request_plan(utterance, intent)
             request_plan_recorded = True
             plan_command = station._command_from_grounding_query_plan(utterance, intent)
@@ -309,11 +327,14 @@ class TurnOrchestrator:
             station._record_request_plan(utterance, intent)
 
         # ── Intent Readiness Requirement Matching (Phase 7.59) ────────────────
-        # Runs for claim/provenance/action; skipped for procedure/control which own
-        # their own readiness semantics (knowledge ops need no capability gate).
+        # Skipped for intents that own their capability resolution downstream —
+        # procedure/control knowledge types, and schema-declared exemptions such as
+        # metric_query (see OperatorIntent.owns_capability_resolution). Arbitrating an
+        # unresolved metric name here would turn the typed "define it first" flow into a
+        # generic capability refusal.
         knowledge_type = intent.knowledge_type
         cap_match = default_matcher.match(intent, station.capability_registry)
-        if knowledge_type not in {"procedure", "control"}:
+        if not intent.owns_capability_resolution:
             composition_command = station._try_compose_grounding_result(
                 utterance,
                 intent,
@@ -435,7 +456,7 @@ class TurnOrchestrator:
             usteps = list(intent.utterance_steps or [])
             if not usteps:
                 return _approved("clarification", utterance, "Please specify the task steps to execute in sequence.")
-            from .llm_compiler import _parse_motor_command as _pmc
+            from .llm_compiler import parse_motor_command as _pmc
             motor_steps = [_pmc(step) for step in usteps]
             if all(step is not None for step in motor_steps):
                 sequence = [

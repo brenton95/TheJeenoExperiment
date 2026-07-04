@@ -34,6 +34,11 @@ Current work item: **13B.6 - Mission Termination And Action Outcomes**.
 Current work status: **in progress at the red-bar/design stage; production implementation has not
 started**.
 
+The **13B.5t target-identity spike (F13)** was inserted and completed before 13B.6: the kernel now
+threads the chosen object's identity through to Sense instead of re-describing it in words, so
+description-identical objects (colourless AI2-THOR-style targets) ground the object the kernel
+actually chose. See the 13B.5t record below.
+
 ### Progress Ledger
 
 | Work | Status | Evidence |
@@ -45,6 +50,7 @@ started**.
 | 13B.4 | **complete** | LLM-default tool-call discipline and deterministic/LLM parity |
 | 13B.5 | **complete** | conditional Sense/Cortex/Spine `MissionContract` execution |
 | Pulled-forward Phase 14 object slice | **complete** | context-driven object routing with exact manifest authority |
+| 13B.5t (F13) | **complete** | chosen-target identity threaded Cortex→Sense via `target_ref`; description-identical objects disambiguated |
 | 13B.6 | **in progress** | design and required red bars defined; production schemas/runtime changes not started |
 | 13B.7 | **queued** | bounded evidence gathering and deterministic meta-primitives |
 | 13C | **queued** | curriculum, scoped reuse, and MTBCI |
@@ -71,8 +77,13 @@ The 13B.1 freshness work has since been connected to the live hot path:
 - passable-cell belief persists across look-away but expires through the same step-based TTL
   instead of accumulating forever.
 
-This is a deliberate partial implementation. Uniform decay, intra-task storage, the mission clock,
-and the separate Sense-side occupancy decay site remain explicit debt documented in
+The later claim-unification pass collapsed `ObservationClaim`/`ExecutionClaim` into the single
+`ClaimRecord` type and moved the cortex belief loop onto one mission-scoped store
+(`OperationalMemory.claims`) shared with the `RepresentationStore`, closing the intra-task-storage
+and mission-clock debt: belief now persists across `run_episode` task runs and decays across a
+mission, while a new task targeting a different object stales the prior grounding observations
+through the freshness model rather than contaminating the new target. Uniform decay and the
+separate Sense-side occupancy decay site remain explicit debt documented in
 [blueprint.md](blueprint.md#freshness-decay--known-debt-phase-13b-claim-decay-on-the-cortex-loop)
 and in the 13B.1 record below.
 
@@ -105,12 +116,13 @@ Pulled-forward Phase 14 object-parametric slice:
 Last verified against the current Phase 13B hot path, including object-parametric routing and
 claim decay:
 
-- `python evals/eval_master.py`: **78/78**
+- `python evals/eval_master.py`: **80/80**
 - `python evals/eval_master.py --suite orpi`: **10/10**
 - `python evals/eval_master.py --suite cleanup`: **30/30**
-- `python evals/eval_master.py --suite llm_path`: **5/5**
+- `python evals/eval_master.py --suite llm_path`: **7/7**
 - `python evals/eval_master.py --suite live_llm`: **1/1** when a live backend is configured
-- `python -m pytest -q tests`: **355 passed**, 1 warning, 12 subtests passed
+- `python -m pytest -q tests`: **380 passed**, 1 warning, 12 subtests passed (includes the
+  13B.5t target-identity red bar)
 
 The deterministic gate runs without the live LLM key. The `live_llm` lane is opt-in and is not
 part of the offline release gate.
@@ -855,11 +867,59 @@ rather than duplicating its current value.
 
 **Deliberate debt:**
 
-- uniform observation decay rate;
-- intra-task Cortex claim store;
-- mission clock depends on live adapter continuity;
-- occupancy belief decays in Sense because planning consumes it before Cortex, leaving two decay
-  sites until claim storage is unified.
+- uniform observation decay rate (still open);
+- occupancy belief decays in Sense because planning consumes it before Cortex, leaving a second,
+  Sense-side decay site (still open — deliberately deferred by the claim-unification pass below).
+
+The intra-task Cortex claim store and the mission-clock dependency were **closed by claim
+unification** (see the record below).
+
+### Claim Unification — One Claim Type, One Mission-Scoped Store
+
+Status: **complete**.
+
+**Pressure:** two claim types (`ObservationClaim` hot-path, `ClaimRecord` representation) and two
+stores (cortex `_claims` rebuilt per task, `RepresentationStore._claims`) duplicated the claim
+custody model and made the intra-task-decay and mission-clock debt unfixable: belief was
+reconstructed per `run_episode`, so decay could not span a mission.
+
+**Decision:** the systemic unit is the store, not just the type. `ClaimRecord` becomes the single
+claim type; the hot-path belief store and the representation store become one mission-scoped store
+on `OperationalMemory.claims`, shared by reference. Belief is cleared only on a typed reset.
+`ExecutionClaim` was dead and was deleted (folded by deletion; `kind="execution"` remains in the
+enum).
+
+**Implementation:**
+
+- `ClaimRecord` gained `last_observed_tick`; cortex observations are authored as
+  `kind="observation"`, `scope="grounding"`, `authority="sense"`;
+- `OperationalMemory.claims` is the one store; `Cortex._claims` and `RepresentationStore._claims`
+  are properties over it (same dict);
+- `reset_episode` clears the store only on the typed-reset path
+  (`clear_reference_context=True`); task admission preserves belief;
+- the decay loop is **kind-aware** — only observations age, so durable claims (operator
+  assertions, facts, procedures) sharing the store never decay from look-away (the merge's safety
+  property);
+- a new task whose resolved target context differs stales the prior grounding observations
+  (they carry a `target_context` provenance stamp), preventing different-target contamination
+  while preserving same-target continuity ("repeat the last task");
+- prewarm warms the `{step}:idle` variants a warm start can begin on, so retained belief never
+  forces a compile in the rendered loop.
+
+**Regressions surfaced and fixed while testing:**
+
+- different-target tasks on one session read the prior task's residual `target_location`
+  (`go to the red door` then `go to the farthest door`) — fixed by grounding-context staling;
+- a warm-start first tick landed on a non-`locate_object` step whose `:idle` sense template was
+  unwarmed, causing one render-loop compile — fixed by prewarm warm-start coverage.
+
+**Acceptance:** `tests/test_claim_unification.py` pins the unified type, the single store, the
+typed-reset boundary, the durable-claim safety property, and grounding-context staling.
+`evals/claim_custody_typed_claims_probe.py` was rewritten to assert the unified type (it had
+pinned the now-reversed `ObservationClaim` duplication). Full gate green:
+`pytest` 366, `eval_master` 78/78, orpi 10/10, cleanup 30/30, llm_path 5/5.
+
+**Carry:** uniform decay and the Sense-side occupancy decay site remain (above).
 
 ### 13B.2 - Native MiniGrid FOV And Eval Lanes
 
@@ -1067,6 +1127,77 @@ active-claim views. Exact manifest handles remain authoritative.
 MiniGrid manifest declarations, validator fixtures, and illustrative prompts. Renaming those is a
 cross-contract migration, not a string replacement.
 
+### 13B.5t - Target Identity Threading (F13)
+
+Status: **complete**.
+
+**Pressure (F13):** when two objects are indistinguishable by description — same type, same colour,
+e.g. two apples — the kernel correctly ranks them and picks one (say the nearest), then hands Sense
+only a *re-description* ("the apple"). Sense re-grounds by description and returns the **first match
+in scan order**, which need not be the object the kernel chose. On MiniGrid GoToDoor every object
+has a unique colour, so the re-description round-trips losslessly and this never surfaced;
+colourless objects (AI2-THOR apples) break it.
+
+**Why it is a kernel bug, not a substrate/convention gap:** the identity is destroyed *inside the
+brain*, before the body is ever told which target. No spine or substrate convention can recover an
+identity it was never handed. The coordinates were not merely "dropped" at a few threading points —
+they were structurally collapsed to an English string (`f"go to the {color} {object_type}"`) that
+`compose_known_task` re-parses back into colour+type only. There was no structured target-identity
+channel between grounding and Sense.
+
+**Decision:** give every object an **adapter-minted `object_id`** — an opaque disambiguation handle
+the kernel carries but never interprets — and thread the chosen object's id through a small
+`target_ref` (`{"object_id": ...}`, with `coord` kept as a fallback) from grounding into the
+`EvidenceFrame` context; Sense matches id-to-id, not by attributes. This is the architecturally-right
+separation: **attributes are for selection, identity is for carry-through.** "Closest", "at this
+point", "the second red door" are *selection queries* that resolve to an id; execution carries the
+id. The substrate owns identity — MiniGrid mints its own (position is its only stable per-object
+identity, since the world is static), AI2-THOR supplies native object ids — so the same kernel path
+disambiguates two red doors on MiniGrid and two moving apples on AI2-THOR without change. `target_ref`
+is a disambiguation hint kept distinct from the sensed `target_location` claim, so the freshness/decay
+axis is untouched. It is stamped only when a valid grounding matches the task's colour+type, so a
+stale grounding for a different request cannot mislabel the current one. Absent for the ordinary
+unique-match case (zero behaviour change there).
+
+**Rejected shortcut (and why the first cut was replaced):** the initial implementation stamped
+`{"coord": (x, y)}` — but a coordinate is a positional *attribute*, not a stable identity, and the
+kernel was *constructing* it, reaching into substrate geometry to fabricate an identity. That is the
+exact leak this fix exists to close. On a static grid a coord and an id are behaviourally identical,
+which is why it passed; it is wrong for a substrate where objects move. The id version makes the
+kernel carry an opaque handle and moves identity-minting behind the adapter where it belongs.
+
+**Red bar first (per stop rules):** `tests/test_target_identity_threading.py` places two
+description-identical doors and asserts (a) the scenario is genuinely ambiguous without a hint,
+(b) pointing `target_ref` at each door in turn grounds *that* door, and (c) the identity survives
+the Cortex→Sense handoff through `EvidenceFrame.context`. Test (b)/(c) failed before the fix (Sense
+returned the first door for both) and pass after.
+
+**Implementation surface (identity minted at the adapter, carried opaquely by the kernel):**
+
+- `jeenom/sense.py` (MiniGrid substrate layer): `_parse_grid_objects` mints an opaque `object_id`
+  per object via `_mint_object_id` (position-derived, stable on the static grid); a substrate with
+  native ids supplies its own here. `_find_object_by_color_type` matches the `target_ref` `object_id`
+  first, then `coord`, then description (falling back when the chosen object is out of FOV or the
+  world changed); `instantiate_template` binds `target_ref` from the merged context into the find
+  primitive params; `_target_ref_object_id`/`_target_ref_coord` parse the hint;
+- `jeenom/schemas.py`: `SceneObject` and `GroundedObjectEntry` gained an `object_id`, carried through
+  `SceneModel.from_world_model_sample` and `GroundedObjectEntry.as_dict`;
+- `jeenom/llm_compiler.py`: `canonical_task_params` gained an optional `target_ref`;
+- `jeenom/operator_station.py`: grounding stamps `obj.object_id` onto each `GroundedObjectEntry`;
+  `_stamp_target_ref` reads `active_claims.last_grounded_target` (still alive at ticket-mint time —
+  it is nulled only once the task runs) and stamps `{"object_id": ..., "coord": ...}`; called once at
+  the `_execution_ticket_from_plan` chokepoint; the run path restores `ticket.params["target_ref"]`
+  after it re-composes the known task from the instruction string.
+
+**AI2-THOR carry (Phase 14):** MiniGrid's `object_id` is position-derived because a static grid has
+no motion to distinguish an id from a coordinate — so the id contract's most interesting property
+(identity that survives motion) is dormant here and cannot be falsified until a moving-object
+substrate exercises it. The kernel/Sense matching code is already substrate-neutral; only the
+adapter's minting function changes for AI2-THOR (native `objectId`). The `coord` fallback in
+`target_ref` is retained for paths/substrates where an id is unavailable.
+
+**Acceptance:** `pytest` 380 passed + 12 subtests; `eval_master` full deterministic gate green.
+
 ## Phase 13C - Curriculum, Reuse, And MTBCI
 
 Status: **planned after 13B**.
@@ -1089,8 +1220,46 @@ The remaining work is intentionally split:
 - structural bindings such as concrete Sense/Spine roles: validate through the second substrate
   rather than rename speculatively.
 
+Named cheap leaks (found by the 2026-07 repo diagnostic; tagged in-code with greppable
+`TECH-DEBT(...)` markers):
+
+- `TECH-DEBT(minigrid-registry-import)` — the generic `capability_registry.py` hard-imports
+  `MINIGRID_GROUNDING_PRIMITIVES` at module level and merges it into the manifest builder. The 12D
+  move took MiniGrid grounding primitives out of `primitive_library.py` but they re-entered through
+  the generic registry; registration should flow adapter → manifest → registry.
+- `TECH-DEBT(operator-colors)` — `schemas.py` `OPERATOR_COLORS` hardcodes the MiniGrid palette as
+  the schema-level validation enum and bakes it into the LLM tool schemas, bypassing
+  `OperationalContext.object_vocabulary`. **Ordering caution:** this leak is plausibly
+  curriculum-touching (vocabulary drives grounding and the enum feeds the LLM tool schemas the
+  curriculum will exercise); the 12D rule says curriculum-touching leaks precede the curriculum, so
+  this one may need to land before 13C rather than waiting for Phase 14.
+- `TECH-DEBT(metric-query-dispatch-bypass)` — **closed (2026-07-03)**. `classify_utterance` had
+  routed metric queries directly to `metric_query_summary`, skipping the IntentVerifier/dispatch
+  chain "to avoid capability-matching regressions". The red bar
+  (`tests/test_metric_query_dispatch_convergence.py`) showed the fear was stale for defined
+  metrics — `metric_query_summary` already re-dispatched a grounding intent through the same gate,
+  so both routes converged; the real hole was the undefined-metric path, which never constructed an
+  `OperatorIntent` at all (verifier never ran, `last_operator_intent` stayed `None`). Fix: the
+  metric-query patterns moved into the `IntentCache` (using its previously dead
+  `_build_metric_query_from_match` builder), the classify bypass was deleted, and dispatch exempts
+  `metric_query` from the premature capability gate because the metric owns its handle resolution
+  downstream (defined → re-dispatched grounding intent through the same gate; undefined → typed
+  `CUSTOM METRIC MISSING` definition flow, which premature arbitration would have flattened into a
+  generic refusal). All three operator-visible behaviors (registered, synthesizable, undefined
+  metric) are pinned unchanged. **Regression caught while fixing:** the first cut expressed the
+  exemption as an `intent_type == "metric_query"` comparison inside `dispatch`, and
+  `pipeline_dispatch_probe` correctly failed it against the 11C no-intent-type-chain invariant —
+  the exemption moved to a schema-declared `OperatorIntent.owns_capability_resolution` property,
+  the same layer where `knowledge_type` lives.
+
 The AI2-THOR branch is a requirements-discovery spike, not the committed port. Every ORPI bend or
 break becomes a concrete spec issue and Phase 15 requirement.
+
+**Considered and rejected (2026-07-03):** pulling the AI2-THOR spike ahead of 13C. The 13B.5t
+target-identity work and the decay TECH-DEBT tags all wait on a moving-object substrate to be
+falsifiable, and 13C's reuse metrics risk being designed against the static-grid degenerate case —
+but the operator decided to keep the spike parked at Phase 14 and proceed through 13B/13C on
+MiniGrid first. Recorded so the ordering question is not re-litigated without new evidence.
 
 ## Phase 15 - Cross-Substrate Proof And ORPI v1
 

@@ -102,6 +102,11 @@ CLAIM_FRESHNESS = ("current", "unverifiable", "stale", "unknown")
 CLAIM_AUTHORITIES = ("operator", "runtime", "system", "compiler", "sense", "spine")
 GROUNDING_QUERY_COMPARISONS = ("above", "below", "within", "at_least", "at_most")
 OPERATOR_TASK_TYPES = ("go_to_object",)
+# TECH-DEBT(operator-colors): this is MiniGrid's palette hardcoded as the schema-level
+# validation enum, and it is baked into the LLM tool schemas below. Colour vocabulary
+# should come from OperationalContext.object_vocabulary like object types do. Possibly
+# curriculum-touching (the enum feeds the tool schemas the curriculum exercises), so it
+# may need to land before 13C rather than waiting for Phase 14.
 OPERATOR_COLORS = ("red", "green", "blue", "yellow", "purple", "grey")
 
 # Domain vocabulary registry — populated by the domain adapter at init, never hardcoded here.
@@ -1742,6 +1747,22 @@ class OperatorIntent:
     def knowledge_type(self) -> str:
         return self._KNOWLEDGE_TYPE_MAP.get(self.intent_type, "control")
 
+    # Intent types that resolve their own capability requirements downstream and are
+    # therefore exempt from dispatch's premature capability gate. metric_query resolves
+    # metric->handle in metric_query_summary: a defined metric re-dispatches a grounding
+    # intent through the gate; an undefined metric gets the typed CUSTOM METRIC MISSING
+    # definition flow, which premature arbitration would flatten into a generic refusal.
+    _OWNS_CAPABILITY_RESOLUTION: ClassVar[frozenset[str]] = frozenset({"metric_query"})
+
+    @property
+    def owns_capability_resolution(self) -> bool:
+        """True when this intent's capability requirements are resolved downstream,
+        like procedure/control knowledge types own their own readiness semantics."""
+        return (
+            self.knowledge_type in {"procedure", "control"}
+            or self.intent_type in self._OWNS_CAPABILITY_RESOLUTION
+        )
+
     @classmethod
     def from_dict(
         cls,
@@ -2135,6 +2156,7 @@ class SceneObject:
     y: float
     state: int | None = None
     z: float | None = None  # absent on 2D substrates (MiniGrid); set on 3D ones
+    object_id: str | None = None  # adapter-minted opaque identity; kernel never parses it
 
     @property
     def coord(self) -> tuple[float, ...]:
@@ -2206,6 +2228,7 @@ class SceneModel:
                 y=geometry.as_coord(obj["y"]),
                 state=obj.get("state"),
                 z=geometry.as_coord(obj["z"]) if obj.get("z") is not None else None,
+                object_id=obj.get("object_id"),
             )
             for obj in (sample.grid_objects or [])
         ]
@@ -2237,6 +2260,7 @@ class GroundedObjectEntry:
     object_type: str = "unknown"
     metric: str | None = None       # e.g. "manhattan", "euclidean"
     provenance: str | None = None   # primitive handle that produced this entry
+    object_id: str | None = None    # adapter-minted opaque identity of the chosen object
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2247,6 +2271,7 @@ class GroundedObjectEntry:
             "distance": self.distance,
             "metric": self.metric,
             "provenance": self.provenance,
+            "object_id": self.object_id,
         }
 
 
@@ -2636,43 +2661,15 @@ class ArbitrationTrace:
 
 
 @dataclass
-class ObservationClaim:
-    """L1 sensory output stored in Cortex's internal claim store.
-
-    Wraps a raw evidence value with provenance so every fact inside the
-    Cortex execution loop has a traceable source and scope.
-    """
-
-    key: str                      # evidence name, e.g. "target_location"
-    value: Any                    # raw value, e.g. (3, 4) or True
-    source: str = "sense"         # component that produced it
-    level: str = "command"        # "primitive" | "command"
-    confidence: float = 1.0
-    scope: str = "grounding"
-    freshness: str = "current"    # current | unverifiable | stale | unknown
-    last_observed_tick: int | None = None  # step_count when last observed in-view
-
-
-@dataclass
-class ExecutionClaim:
-    """L1 motor output — provenance record for a completed motor primitive or command."""
-
-    source_primitive: str         # e.g. "move_forward" / "navigate_to_object"
-    level: str                    # "primitive" | "command" | "procedure" | "task"
-    scope: str = "motor"
-    success: bool = True
-    steps_taken: int = 0
-    payload: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class ClaimRecord:
-    """Representation-store claim wrapper.
+    """The single claim type.
 
-    Existing specialized claim types remain valid at block boundaries. ClaimRecord
-    is the small common shape used by the knowledge surface so facts, beliefs,
-    hypotheses, operator assertions, observations, and execution results retain
-    authority/provenance/freshness.
+    One typed shape for every claim — facts, beliefs, hypotheses, operator
+    assertions, observations, execution results, and procedures — so each retains
+    kind/status/scope/authority/provenance/freshness. Hot-path sensory beliefs are
+    authored as ``kind="observation"`` and carry ``last_observed_tick`` for the
+    freshness decay machine; both the Cortex belief loop and the RepresentationStore
+    read/write the same mission-scoped store on ``OperationalMemory``.
     """
 
     claim_id: str
@@ -2688,6 +2685,7 @@ class ClaimRecord:
     provenance: dict[str, Any] = field(default_factory=dict)
     freshness: str = "current"
     invalidation: dict[str, Any] = field(default_factory=dict)
+    last_observed_tick: int | None = None  # substrate step_count when last in-view
 
     def __post_init__(self) -> None:
         if self.kind not in CLAIM_KINDS:
@@ -2748,6 +2746,7 @@ class ClaimRecord:
             provenance=_ensure_dict(mapping.get("provenance", {}), "ClaimRecord.provenance"),
             freshness=_ensure_str(mapping.get("freshness", "current"), "ClaimRecord.freshness"),
             invalidation=_ensure_dict(mapping.get("invalidation", {}), "ClaimRecord.invalidation"),
+            last_observed_tick=mapping.get("last_observed_tick"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -2765,6 +2764,7 @@ class ClaimRecord:
             "provenance": dict(self.provenance),
             "freshness": self.freshness,
             "invalidation": dict(self.invalidation),
+            "last_observed_tick": self.last_observed_tick,
         }
 
 
