@@ -792,7 +792,10 @@ def test_parse_go_to_object_utterance_no_color() -> None:
     helper = Ai2thorDomainHelper(operational_context=ctx)
     result = helper.parse_go_to_object_utterance("go to the apple")
     assert result is not None
-    assert result["color"] == ""
+    # Plan 013: a colourless request now carries color=None (was ""), aligning the
+    # parser with the color=None that Ai2thorSense already emits — this unblocks the
+    # F13 stamp's colour gate. See tests/test_ai2thor_target_ref_population.py.
+    assert result["color"] is None
     assert result["object_type"] == "apple"
 
 

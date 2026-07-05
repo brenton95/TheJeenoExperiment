@@ -66,7 +66,7 @@ class Ai2thorDomainHelper:
         )
         if not match:
             return None
-        color = match.group("color") or ""
+        color = match.group("color") or None
         if color in _RANKING_TERMS:
             return None
         return {
@@ -209,7 +209,7 @@ class Ai2thorDomainHelper:
         )
         if not match:
             return None
-        color = match.group("color") or ""
+        color = match.group("color") or None
         if color in _RANKING_TERMS:
             return None
         return {
