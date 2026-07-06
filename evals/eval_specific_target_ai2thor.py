@@ -26,13 +26,16 @@ What it does:
        turn 1: "which apple is closest?"   -> grounding ranks, stamps last_grounded_target
        turn 2: "go to the apple"           -> _stamp_target_ref -> sense resolves by object_id
      Then repeats with "which apple is farthest?" to prove the OTHER apple wins.
-  3. Asserts nav ended adjacent to the CHOSEN apple's cell, and that resolution
-     matched BY object_id (instrumented), not coord (dead on floats) or scan order.
+  3. Asserts the kernel resolved to the CHOSEN apple by object_id — read from the
+     resolved target_object.object_id (which carries AI2-THOR's native objectId),
+     surfaced via result["last_world_sample"]. No new field, no matched_by flag:
+     the resolved object_id already rides the channel the kernel produces.
 
 PASS criteria (F13 CLOSED):
-  - nearest run: agent stops adjacent to A, matched_by == "object_id", target_id == A's id
-  - farthest run: agent stops adjacent to B, matched_by == "object_id", target_id == B's id
-  - both: runtime_llm_calls_during_render == 0, cache_miss_during_render == 0
+  - nearest run: resolved_target_id == near apple's object_id (the "closest" one)
+  - farthest run: resolved_target_id == far apple's object_id (the "farthest" one)
+  - discriminated: the two queries resolve to DIFFERENT apples
+  - all runs: runtime_llm_calls_during_render == 0, cache_miss_during_render == 0
 """
 
 from __future__ import annotations
@@ -50,11 +53,16 @@ from jeenom.llm_compiler import SmokeTestCompiler
 from jeenom.operator_station import OperatorStationSession
 
 
-def _place_two_apples(controller: Any) -> dict[str, tuple[float, float]]:
+def _place_two_apples(controller: Any) -> dict[str, dict[str, Any]]:
     """Spawn two identical apples on reachable cells at different distances.
 
-    Returns {"near": (x,z), "far": (x,z)} of the placed cells. y is irrelevant to
-    floor nav; (x,z) is what matters (see SESSION_STATE apple-on-counter finding).
+    Returns {"near": {"cell": (x,z), "object_id": id}, "far": {...}}. y is
+    irrelevant to floor nav; (x,z) is what matters (see SESSION_STATE
+    apple-on-counter finding). object_id is re-read AFTER PlaceObjectAtPoint
+    because AI2-THOR re-derives objectId from the placed position — the id at
+    spawn is not the id after placement. The eval asserts the kernel resolves to
+    THIS specific id per run (near for "closest", far for "farthest"), which is
+    the F13 close-out: description-identical apples, identity the sole discriminator.
 
     Uses ONLY InitialRandomSpawn + PlaceObjectAtPoint — both verified live on the
     Colab Linux64+Xvfb software renderer (2026-07-06). The prior RemoveFromScene +
@@ -88,14 +96,23 @@ def _place_two_apples(controller: Any) -> dict[str, tuple[float, float]]:
         raise RuntimeError(
             f"expected >=2 apples after InitialRandomSpawn, got {len(apple_ids)}")
 
-    placed: dict[str, tuple[float, float]] = {}
+    placed: dict[str, dict[str, Any]] = {}
     for (label, cell), apple_id in zip((("near", near), ("far", far)), apple_ids):
         controller.step(
             action="PlaceObjectAtPoint", objectId=apple_id,
             position={"x": cell["x"], "y": cell["y"] + 0.05, "z": cell["z"]},
             renderImage=False,
         )
-        placed[label] = (cell["x"], cell["z"])
+        # Re-read the id after placement: AI2-THOR re-derives objectId from position,
+        # so match the apple now nearest this cell to recover its post-placement id.
+        apples_now = [o for o in controller.last_event.metadata["objects"]
+                      if o["objectType"] == "Apple"]
+        placed_id = min(
+            apples_now,
+            key=lambda o: (o["position"]["x"] - cell["x"]) ** 2
+            + (o["position"]["z"] - cell["z"]) ** 2,
+        )["objectId"]
+        placed[label] = {"cell": (cell["x"], cell["z"]), "object_id": placed_id}
     return placed
 
 
@@ -115,16 +132,21 @@ def _run_turn_pair(controller: Any, rank_utterance: str) -> dict[str, Any]:
     session.handle_utterance("go to the apple")          # turn 2: F13 identity path
     lr = session.last_result or {}
     fs = lr.get("final_state", {})
-    # The station stamps target_ref onto the ticket; the resolved target rides in
-    # final_state. matched_by/target_id are read from the sense resolution instrumented
-    # in Ai2thorSense (falls back to inspecting the resolved target_object).
+    # The resolved target + agent pose ride in last_world_sample (the adapter already
+    # surfaces WorldModelSample.summary() at result["last_world_sample"]); they are NOT
+    # in final_state (which is dict(cortex.execution_state)). target_object is the
+    # resolved grid_obj carrying the native objectId — no new field, no matched_by flag.
+    sample = lr.get("last_world_sample") or {}
+    target_object = sample.get("target_object")
+    # No agent_pose check: task_complete already requires the spine's adjacency
+    # postcondition (agent reached the target), so asserting pose here would be
+    # redundant. The load-bearing proof is resolved_target_id == the expected apple.
     return {
         "task_complete": fs.get("task_complete", False),
         "cache_miss_during_render": lr.get("cache_miss_during_render", -1),
         "runtime_llm_calls_during_render": lr.get("runtime_llm_calls_during_render", -1),
-        "resolved_target_id": fs.get("target_object", {}).get("object_id")
-        if isinstance(fs.get("target_object"), dict) else None,
-        "agent_final": fs.get("agent_pose"),
+        "resolved_target_id": target_object.get("object_id")
+        if isinstance(target_object, dict) else None,
     }
 
 
@@ -145,6 +167,11 @@ def main() -> int:
     placed = _place_two_apples(controller)
     print(f"placed apples: near={placed['near']} far={placed['far']}\n")
 
+    # Which apple id the kernel MUST resolve to per ranking query. "closest?" ->
+    # the near apple; "farthest?" -> the far apple. Different expected ids from the
+    # SAME "go to the apple" instruction is the whole F13 proof.
+    expected_id = {"nearest": placed["near"]["object_id"],
+                   "farthest": placed["far"]["object_id"]}
     results = {
         "nearest": _run_turn_pair(controller, "which apple is closest?"),
         "farthest": _run_turn_pair(controller, "which apple is farthest?"),
@@ -152,20 +179,43 @@ def main() -> int:
 
     checks: dict[str, bool] = {}
     for which, r in results.items():
-        print(f"--- {which} ---\n{r}\n")
+        print(f"--- {which} --- (expected id: {expected_id[which]})\n{r}\n")
         checks[f"{which}_task_complete"] = r["task_complete"] is True
         checks[f"{which}_cache_miss_zero"] = r["cache_miss_during_render"] == 0
         checks[f"{which}_llm_calls_zero"] = r["runtime_llm_calls_during_render"] == 0
-        checks[f"{which}_matched_by_object_id"] = r["resolved_target_id"] is not None
+        # The load-bearing F13 check: resolved to the CORRECT apple by object_id, not
+        # merely to *an* apple. non-None alone would pass even on scan-order fallback.
+        checks[f"{which}_resolved_correct_id"] = (
+            r["resolved_target_id"] == expected_id[which]
+        )
+
+    # Behavioural cross-check: the two runs must NOT resolve to the same apple.
+    checks["discriminated"] = (
+        results["nearest"]["resolved_target_id"] is not None
+        and results["nearest"]["resolved_target_id"]
+        != results["farthest"]["resolved_target_id"]
+    )
+
+    # Diagnostic: if 'discriminated' PASSES but both 'resolved_correct_id' FAIL, the
+    # kernel IS discriminating (two different apples) but the stored expected_id drifted
+    # from the id seen during nav — AI2-THOR re-derives position-based objectIds and
+    # physics may have re-settled the apple after placement. That is an eval-harness id
+    # issue, NOT a dead wire. Distinguish it explicitly so the live run isn't misread.
+    if (checks.get("discriminated")
+            and not checks.get("nearest_resolved_correct_id")
+            and not checks.get("farthest_resolved_correct_id")):
+        print("DIAGNOSTIC: discrimination works but expected ids drifted (objectId "
+              "re-derivation / physics resettle) — F13 wire likely OK; fix expected-id "
+              "capture, not the adapter.\n")
 
     print("CHECKS")
     for name, ok in checks.items():
         print(f"{'PASS' if ok else 'FAIL'} {name}")
     n = sum(checks.values())
     print(f"\n{n}/{len(checks)} passed")
-    print("\nNOTE: also eyeball agent_final vs placed cells — nearest must sit by the "
-          "near cell, farthest by the far cell. If both stop at the same apple, the "
-          "identity path did NOT discriminate (F13 not closed).")
+    print("\nNOTE: resolved_correct_id proves identity match (near apple for 'closest', "
+          "far for 'farthest'); 'discriminated' proves the two queries reach DIFFERENT "
+          "apples. Both green = F13 closed on live AI2-THOR.")
     return 0 if all(checks.values()) else 1
 
 
