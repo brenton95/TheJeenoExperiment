@@ -17,9 +17,11 @@ CloudRendering on Colab (Vulkan segfault). Setup in a Colab cell BEFORE this:
     !python evals/eval_specific_target_ai2thor.py
 
 What it does:
-  1. Spawns FloorPlan1 (Linux64), removes native apples, PlaceObjectAtPoint's TWO
-     apples onto two distinct GetReachablePositions cells at clearly different
-     distances from the agent (near cell A, far cell B).
+  1. Spawns FloorPlan1 (Linux64), InitialRandomSpawn's TWO identical apples, then
+     PlaceObjectAtPoint's them onto two distinct GetReachablePositions cells at
+     clearly different distances from the agent (near cell A, far cell B).
+     (RemoveFromScene/CreateObject hang the backend on Colab software render — see
+     _place_two_apples; only PlaceObjectAtPoint + InitialRandomSpawn are used.)
   2. Two-turn flow through the REAL station:
        turn 1: "which apple is closest?"   -> grounding ranks, stamps last_grounded_target
        turn 2: "go to the apple"           -> _stamp_target_ref -> sense resolves by object_id
@@ -49,10 +51,18 @@ from jeenom.operator_station import OperatorStationSession
 
 
 def _place_two_apples(controller: Any) -> dict[str, tuple[float, float]]:
-    """Remove native apples, place two on reachable cells at different distances.
+    """Spawn two identical apples on reachable cells at different distances.
 
     Returns {"near": (x,z), "far": (x,z)} of the placed cells. y is irrelevant to
     floor nav; (x,z) is what matters (see SESSION_STATE apple-on-counter finding).
+
+    Uses ONLY InitialRandomSpawn + PlaceObjectAtPoint — both verified live on the
+    Colab Linux64+Xvfb software renderer (2026-07-06). The prior RemoveFromScene +
+    CreateObject path HUNG the backend for the full server_timeout on Colab
+    (physics-heavy scene mutation under software render); those actions were never
+    exercised by the green 012 mission run, which only ever PlaceObjectAtPoint'd.
+    Two apples of the same type are description-identical, so object_id stays the
+    sole discriminator (the F13 acceptance condition).
     """
     controller.step(action="Initialize", renderImage=False)
     reach = controller.step(action="GetReachablePositions", renderImage=False)
@@ -65,18 +75,21 @@ def _place_two_apples(controller: Any) -> dict[str, tuple[float, float]]:
     ranked = sorted(positions, key=dist)
     near, far = ranked[1], ranked[-1]  # skip the agent's own cell at index 0
 
-    # Remove native apples so only our two exist (identity must be the discriminator).
-    for obj in list(controller.last_event.metadata["objects"]):
-        if obj["objectType"] == "Apple":
-            controller.step(action="RemoveFromScene", objectId=obj["objectId"],
-                            renderImage=False)
+    # Ensure exactly two Apples exist (FloorPlan1 ships one native). This is the
+    # non-hanging duplicate route: no RemoveFromScene / CreateObject.
+    controller.step(
+        action="InitialRandomSpawn", randomSeed=42, forceVisible=True,
+        numDuplicatesOfType=[{"objectType": "Apple", "count": 2}],
+        renderImage=False,
+    )
+    apple_ids = [o["objectId"] for o in controller.last_event.metadata["objects"]
+                 if o["objectType"] == "Apple"]
+    if len(apple_ids) < 2:
+        raise RuntimeError(
+            f"expected >=2 apples after InitialRandomSpawn, got {len(apple_ids)}")
 
     placed: dict[str, tuple[float, float]] = {}
-    for label, cell in (("near", near), ("far", far)):
-        ev = controller.step(
-            action="CreateObject", objectType="Apple", renderImage=False,
-        )
-        apple_id = ev.metadata["actionReturn"]
+    for (label, cell), apple_id in zip((("near", near), ("far", far)), apple_ids):
         controller.step(
             action="PlaceObjectAtPoint", objectId=apple_id,
             position={"x": cell["x"], "y": cell["y"] + 0.05, "z": cell["z"]},
