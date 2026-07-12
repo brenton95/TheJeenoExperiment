@@ -50,6 +50,21 @@ def _target_ref_coord(target_ref: Any) -> tuple[int, int] | None:
     return tuple(coord)  # type: ignore[return-value]
 
 
+def _target_ref_attributes(target_ref: Any) -> dict[str, Any] | None:
+    """Extract the parse-time attribute criterion from a target_ref hint, if present.
+
+    Plan 014 Step 2. Unlike object_id/coord (kernel-selected identity, F13), this
+    is packed by the ADAPTER PARSER at parse time — the kernel forwards it opaquely
+    (compose_known_task, committed 352a806) without evaluating it.
+    """
+    if not isinstance(target_ref, dict):
+        return None
+    attrs = target_ref.get("attributes")
+    if not isinstance(attrs, dict) or not attrs:
+        return None
+    return attrs
+
+
 class Ai2thorSense:
     """Sensory adapter for AI2-THOR: parses event.metadata into WorldModelSample/SceneModel.
 
@@ -140,7 +155,13 @@ class Ai2thorSense:
                 "x": ox,
                 "y": oy,
                 "z": oz,
-                "state": None,
+                # Rule 11: hand up AI2-THOR's own state fields opaquely, do not
+                # interpret them. Plan 014 Step 1 — was hardcoded None.
+                "state": {
+                    k: obj[k]
+                    for k in ("isOpen", "isToggled", "isSliced", "isPickedUp")
+                    if k in obj
+                },
                 # A1 (link 1): hand up AI2-THOR's native objectId opaquely (Rule 11:
                 # substrate-honest — no minting). The kernel carries it as the object's
                 # identity so F13 disambiguation survives colourless re-description.
@@ -164,7 +185,8 @@ class Ai2thorSense:
         # currently observable, rather than fabricating it.
         chosen_id = _target_ref_object_id(target_ref)
         chosen_coord = _target_ref_coord(target_ref)
-        if chosen_id is not None or chosen_coord is not None:
+        chosen_attrs = _target_ref_attributes(target_ref)
+        if chosen_id is not None or chosen_coord is not None or chosen_attrs is not None:
             for grid_obj in grid_objects:
                 if target_object_type and grid_obj["type"] != target_object_type:
                     continue
@@ -176,7 +198,19 @@ class Ai2thorSense:
                     and chosen_coord is not None
                     and (grid_obj["x"], grid_obj["y"]) == chosen_coord
                 )
-                if id_match or coord_match:
+                # Plan 014 Step 2: a one-turn attribute criterion ("the open
+                # fridge") has no id/coord — the kernel never selected among
+                # candidates, it only forwarded what the parser packed. Match
+                # only when EVERY declared attribute equals the object's
+                # populated state (Step 1).
+                attrs_match = chosen_id is None and chosen_coord is None and (
+                    chosen_attrs is not None
+                    and all(
+                        grid_obj.get("state", {}).get(field) == value
+                        for field, value in chosen_attrs.items()
+                    )
+                )
+                if id_match or coord_match or attrs_match:
                     target_visible = True
                     target_location = (grid_obj["x"], grid_obj["y"])
                     target_object = grid_obj

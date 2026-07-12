@@ -688,6 +688,69 @@ type-aware. Defer to Phase 15 with F14. **Note:** this means the apple→garbage
 swap does NOT require renaming the handle — resolution is metric-keyed, so the
 existing `all_apples` handle resolves a garbagecan ranking unchanged.
 
+### F16 — Task params has no carrier for a substrate-defined attribute criterion (kernel)
+
+Plan 014 (Task 2 — "go to the open fridge": select an object by a state
+attribute the kernel was never built for, the way F13 carries `object_id`
+opaquely) traced the attribute value end-to-end per D2 and found the channel
+does not exist. Two hardcoded drop points, both kernel:
+
+1. `compose_known_task` (`operator_station.py:5310-5322`) forwards only
+   `color=parsed["color"]` and `object_type=parsed["object_type"]` from the
+   domain helper's parsed dict. Any extra key the adapter's parser emits
+   (e.g. `state`/`attribute`) is discarded here, before `params` is built.
+2. `canonical_task_params` (`llm_compiler.py:248-262`) is a fixed 4-key dict
+   literal (`color`, `object_type`, `target_location`, `target_ref`) with no
+   `**kwargs` / passthrough. A new key cannot survive it regardless of #1.
+
+All 4 call sites of `canonical_task_params` are in kernel files
+(`llm_compiler.py`, `operator_station.py`) — there is no adapter-controlled
+construction path for `params`. The sense-side merge
+(`ai2thor_sense.py:90-94`) is not the problem: `merged_context.update(
+execution_context.params)` would pass an arbitrary key through fine. The
+block is entirely upstream, at parse-time param assembly in the kernel.
+
+- **Surfaced by:** plan 014 Step 0 carrier trace (D2), before any code was
+  written — this is the STOP branch D2 was written to catch.
+- **Severity:** kernel-level, same family as F13. No adapter-level
+  workaround exists that doesn't defeat the thesis: riding `target_ref`
+  would collapse this into the F13 two-turn stamp mechanism (plan 014's
+  "What this is NOT" explicitly rules this out — the attribute is known at
+  parse time, not via kernel selection), and smuggling it through
+  `evidence_frame.context` would misuse a per-tick sensory carrier as a
+  parse-time task criterion.
+- **Invariant violated:** F13 established that the kernel can carry an
+  *opaque identity* end-to-end without interpreting it. F16 shows that
+  guarantee does not extend to an opaque *attribute criterion* — there is
+  currently no field in `TaskRequest.params` for "a criterion the kernel
+  cannot evaluate but must pass through unchanged."
+- **Triage — RESOLVED IN PRINCIPLE (2026-07-08, Aniketh):** do NOT add a new
+  sibling key. **Reuse the existing `target_ref` bag** (already
+  `dict[str, Any]`, already opaque to the kernel) to also carry the attribute
+  criterion — e.g. `{"object_id": ..., "attributes": {"isOpen": true}}`. The
+  bag can already hold this; that was never the blocker. **The real edit is
+  the write path:** `compose_known_task` (`operator_station.py:5310-5322`)
+  currently calls `canonical_task_params(color=..., object_type=...)` and does
+  NOT forward any parse-time `target_ref` from the domain helper's output — so
+  an adapter-parsed attribute cannot reach the bag. Fix = let
+  `compose_known_task` forward the parser's emitted `target_ref`/attribute into
+  the bag. This is a **kernel edit** (that one function), NOT adapter-only —
+  the slot existing does not mean the slot gets populated at parse time. Same
+  non-interpretation guarantee: the kernel forwards the bag untouched, sense
+  interprets it.
+  - **Open naming question (flagged, NOT decided):** `target_ref` is an
+    identity-flavoured name now carrying a criterion. Candidate rename to a
+    neutral `selector` / `grounding_ref`. Defer to Aniketh; cosmetic, does not
+    change the mechanism.
+  - **Scope still to confirm with Aniketh:** his "yes to the bag" must cover
+    the `compose_known_task` forward edit (#2 above), not just "the bag can
+    hold it" (#1, trivially true). If only #1, still blocked.
+- **Status:** approved in principle, not built. Was blocking plan 014 Steps
+  1-4 (adapter-side sense filtering has no criterion to filter by until the
+  write path lands). Alternative rejected: a separate `attribute_ref` sibling
+  slot (would grow one slot per reference-kind; the generic bag scales via keys
+  instead).
+
 ## 12. Design And Implementation History
 
 This section preserves why ORPI v0.1 has its current shape. It is not a roadmap.

@@ -7,7 +7,18 @@ from .schemas import OperationalContext
 # this list so they cannot drift (CLAUDE.md rule 3). Each type listed here must
 # be a single-instance, floor-reachable object in the scene (or placed onto a
 # reachable cell at episode setup) — see plan 012.
-AI2THOR_GO_TO_OBJECT_TYPES = ["apple", "tomato", "mug"]
+AI2THOR_GO_TO_OBJECT_TYPES = ["apple", "tomato", "mug", "fridge"]
+
+# Plan 014 (Task 2) — declared word->(state field, expected value) mapping for
+# substrate-defined state attributes (e.g. "open"/"closed" -> AI2-THOR's
+# isOpen). Substrate-owns-its-vocabulary (Aniketh-approved, plan 014 Step 3).
+# Not part of the shared OperationalContext schema (attribute_vocabulary there
+# is a flat category list, not a word->field mapping) — kept adapter-local by
+# design so no kernel schema change is needed.
+AI2THOR_ATTRIBUTE_STATE_FIELDS: dict[str, tuple[str, bool]] = {
+    "open": ("isOpen", True),
+    "closed": ("isOpen", False),
+}
 
 
 class Ai2thorOperationalContext(OperationalContext):
