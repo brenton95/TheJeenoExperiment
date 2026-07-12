@@ -5317,6 +5317,11 @@ class OperatorStationSession:
             params=canonical_task_params(
                 color=parsed["color"],
                 object_type=parsed["object_type"],
+                # Forward the adapter's opaque selection bag when its parser emits one.
+                # The kernel carries it untouched (same non-interpretation guarantee as
+                # object_id); sense interprets the contents. None today for adapters whose
+                # parser packs nothing — a pure no-op until an adapter populates it.
+                target_ref=parsed.get("target_ref"),
             ),
             source="operator_station_known_family",
         )
