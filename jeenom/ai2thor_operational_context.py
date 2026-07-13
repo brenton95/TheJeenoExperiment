@@ -4,10 +4,12 @@ from .schemas import OperationalContext
 
 # Single source of truth for the object types this substrate can navigate to.
 # Both the operational-context vocabulary and the adapter manifest derive from
-# this list so they cannot drift (CLAUDE.md rule 3). Each type listed here must
-# be a single-instance, floor-reachable object in the scene (or placed onto a
-# reachable cell at episode setup) — see plan 012.
-AI2THOR_GO_TO_OBJECT_TYPES = ["apple", "tomato", "mug", "fridge"]
+# this list so they cannot drift (CLAUDE.md rule 3). Types must be floor-reachable
+# in the scene (or placed onto a reachable cell at episode setup) — see plan 012.
+# apple/tomato/mug/fridge are single-instance go-to targets; cabinet/drawer are
+# added for plan 014's attribute-select (Task 2), where the scene ships a same-type
+# PAIR differing only in isOpen — the attribute, not identity, disambiguates.
+AI2THOR_GO_TO_OBJECT_TYPES = ["apple", "tomato", "mug", "fridge", "cabinet", "drawer"]
 
 # Plan 014 (Task 2) — declared word->(state field, expected value) mapping for
 # substrate-defined state attributes (e.g. "open"/"closed" -> AI2-THOR's
